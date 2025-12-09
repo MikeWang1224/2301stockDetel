@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-整合版：光寶科 LSTM 股價預測 + 5/10 日線繪製
+整合版：光寶科 LSTM 股價預測 + 預測 5/10 日線
 🔥 功能：
   - 抓取股價
   - 計算技術指標
   - 寫入 Firestore
   - 訓練 LSTM
-  - 預測未來 10 天
-  - 計算 SMA_5 與 SMA_10
+  - 預測未來 MA5 與 MA10
   - 畫圖顯示
 """
 
@@ -60,7 +59,11 @@ def fetch_and_calculate():
     df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = (df['EMA_12'] - df['EMA_26']).round(5)
 
-    return df
+    # 計算未來 MA5、MA10 作為 LSTM 預測目標
+    df['Fut_MA5'] = df['Close'].shift(-4).rolling(5).mean()
+    df['Fut_MA10'] = df['Close'].shift(-9).rolling(10).mean()
+
+    return df.dropna()
 
 
 # ============================ 💾 寫入 Firestore ============================
@@ -74,7 +77,6 @@ def save_to_firestore(df):
     for idx, row in df.iterrows():
         date_str = idx.strftime("%Y-%m-%d")
         data = {col: float(row[col]) for col in selected if not pd.isna(row[col])}
-
         doc_ref = db.collection(collection).document(date_str)
         batch.set(doc_ref, {"2301.TW": data})
         count += 1
@@ -105,16 +107,20 @@ def read_from_firestore():
 # ============================ 🤖 建 LSTM 模型 ============================
 def train_lstm(df):
     features = ['Close', 'Volume', 'MACD', 'RSI', 'K', 'D']
+    targets = ['Fut_MA5', 'Fut_MA10']
 
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[features])
+    scaler_x = MinMaxScaler()
+    scaler_y = MinMaxScaler()
 
-    X, y = [], []
+    X_scaled = scaler_x.fit_transform(df[features])
+    y_scaled = scaler_y.fit_transform(df[targets])
+
     window = 30
+    X, y = [], []
 
-    for i in range(window, len(scaled)):
-        X.append(scaled[i-window:i])
-        y.append(scaled[i][0])
+    for i in range(window, len(df)):
+        X.append(X_scaled[i-window:i])
+        y.append(y_scaled[i])
 
     X, y = np.array(X), np.array(y)
 
@@ -123,44 +129,38 @@ def train_lstm(df):
         Dropout(0.2),
         LSTM(50),
         Dropout(0.2),
-        Dense(1)
+        Dense(2)   # 預測 MA5 和 MA10
     ])
 
     model.compile(optimizer='adam', loss='mse')
     model.fit(X, y, epochs=30, batch_size=32, verbose=1)
 
     print("🎉 LSTM 訓練完成")
-    return model, scaler, scaled
+    return model, scaler_x, scaler_y, X_scaled
 
 
-# ============================ 🔮 預測未來 10 天 ============================
-def predict_future(model, scaler, scaled, df):
-    last_30 = scaled[-30:]     # shape (30, 6)
+# ============================ 🔮 預測未來 MA5 / MA10 ============================
+def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df):
+    last_30 = X_scaled[-30:]
     future = []
 
-    for _ in range(10):
-        pred = model.predict(last_30.reshape(1, 30, scaled.shape[1]))
-        future.append(pred[0][0])
+    for _ in range(10):  # 預測未來 10 天 MA
+        pred = model.predict(last_30.reshape(1, 30, X_scaled.shape[1]))
+        future.append(pred[0])
 
-        # 🔥 修正：把 pred 擴展成 shape (1, 6)
-        pred_full = np.zeros((1, scaled.shape[1]))
-        pred_full[0, 0] = pred[0][0]  # Close 位置
+        # 更新 last_30
+        new_row = np.zeros((1, X_scaled.shape[1]))
+        new_row[0, 0] = pred[0][0]  # 使用 MA5 預測替代 Close
+        last_30 = np.append(last_30[1:], new_row, axis=0)
 
-        # 🔥 正確拼接
-        last_30 = np.append(last_30[1:], pred_full, axis=0)
+    future_array = np.array(future)
+    future_ma = scaler_y.inverse_transform(future_array)
 
-    future_array = np.array(future).reshape(-1, 1)
-    zeros_array = np.zeros((future_array.shape[0], scaled.shape[1] - 1))
-    stacked = np.hstack((future_array, zeros_array))
-
-    future_prices = scaler.inverse_transform(stacked)[:, 0]
-
-    # 避免 pandas "closed" 參數警告（新版已移除）
-    dates = pd.date_range(df['date'].iloc[-1], periods=11)[1:]
-
+    dates = pd.date_range(df['date'].iloc[-1], periods=10)[1:]  # 從明天開始
     df_future = pd.DataFrame({
         "date": dates,
-        "Close": future_prices
+        "Pred_MA5": future_ma[:, 0],
+        "Pred_MA10": future_ma[:, 1]
     })
 
     return df_future
@@ -168,41 +168,42 @@ def predict_future(model, scaler, scaled, df):
 
 # ============================ 📈 畫圖 ============================
 def plot_all(df_real, df_future):
-    df_all = pd.concat([df_real[['date','Close']], df_future])
+    df_real['date'] = pd.to_datetime(df_real['date'])
+    plt.figure(figsize=(12,6))
 
-    # 🔥 這一行很重要：統一日期格式
-    df_all['date'] = pd.to_datetime(df_all['date'])
+    # 畫收盤價
+    plt.plot(df_real['date'], df_real['Close'], label="Close", color="blue")
 
-    df_all['SMA_5'] = df_all['Close'].rolling(5).mean()
-    df_all['SMA_10'] = df_all['Close'].rolling(10).mean()
+    # 畫歷史 SMA5 / SMA10
+    plt.plot(df_real['date'], df_real['SMA_5'], label="SMA5", color="green")
+    plt.plot(df_real['date'], df_real['SMA_10'], label="SMA10", color="orange")
+
+    # 畫預測 MA5 / MA10
+    plt.plot(df_future['date'], df_future['Pred_MA5'], '--', label="Pred MA5", color="lime")
+    plt.plot(df_future['date'], df_future['Pred_MA10'], '--', label="Pred MA10", color="red")
+
+    plt.legend()
+    plt.title("2301.TW 預測 5/10 日線")
+    plt.xlabel("Date")
+    plt.ylabel("Price")
 
     results_dir = "results"
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
-
     today = datetime.now().strftime("%Y-%m-%d")
     file_path = f"{results_dir}/{today}.png"
-
-    plt.figure(figsize=(12,6))
-    plt.plot(df_all['date'], df_all['Close'], label="Real/Pred Close")
-    plt.plot(df_all['date'], df_all['SMA_5'], label="SMA 5")
-    plt.plot(df_all['date'], df_all['SMA_10'], label="SMA 10")
-    plt.legend()
-    plt.title("2301.TW 預測 + 5/10 日線")
-
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
-
     print(f"📌 圖片已儲存：{file_path}")
 
 
 # ============================ ▶️ 主流程 ============================
 if __name__ == "__main__":
-    df = fetch_and_calculate()          # 抓股價 + 指標
-    save_to_firestore(df)               # 寫入 Firestore
+    df = fetch_and_calculate()
+    save_to_firestore(df)
 
-    df_train = read_from_firestore()    # 讀 Firestore
-    model, scaler, scaled = train_lstm(df_train)
+    df_train = read_from_firestore()
+    model, scaler_x, scaler_y, X_scaled = train_lstm(df_train)
 
-    df_future = predict_future(model, scaler, scaled, df_train)
+    df_future = predict_future_ma(model, scaler_x, scaler_y, X_scaled, df_train)
     plot_all(df_train, df_future)
