@@ -188,53 +188,48 @@ def compute_pred_ma_from_pred_closes(last_known_closes, pred_closes):
     return results
 
 # ---------------- 畫圖函式 ----------------
-def plot_results(df_hist, df_future_preds, save_path):
-    plt.figure(figsize=(14,7))
+def plot_all(df_real, df_future, hist_days=60):
+    df_real = df_real.copy()
+    df_real['date'] = pd.to_datetime(df_real.index).tz_localize(None)
 
-    # ------- 方法一：建立連續時間軸（連接昨日→今日→明日） -------
-    # 提取歷史最後 60 天
-    hist_plot = df_hist.copy()
-    hist_plot['date'] = pd.to_datetime(hist_plot.index).tz_localize(None)
-    start_date = hist_plot['date'].max() - pd.Timedelta(days=60)
-    hist_plot = hist_plot[hist_plot['date'] >= start_date]
+    # 取最近 hist_days 個「交易日」
+    df_plot_real = df_real.tail(hist_days)
 
-    # 把歷史 + 未來預測合併
-    combined = pd.concat([
-        hist_plot[['date','Close','SMA_5','SMA_10']],
-        df_future_preds[['date','Pred_Close','Pred_MA5','Pred_MA10']]
-    ], ignore_index=True)
+    # 只顯示預測部分的交易日（排除六日）
+    df_future = df_future.copy()
+    df_future['date'] = pd.to_datetime(df_future['date'])
+    df_future = df_future[df_future['date'].dt.weekday < 5]   # 0=Mon ... 4=Fri
 
-    # 建立連續每日 index（方法一：線絕對接起來）
-    full_range = pd.date_range(
-        start=combined['date'].min(),
-        end=combined['date'].max(),
-        freq='D'
-    )
+    plt.figure(figsize=(16,8))
 
-    full_df = pd.DataFrame({'date': full_range})
-    combined = full_df.merge(combined, on='date', how='left')
+    # 畫歷史線（交易日自然連接）
+    plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close")
+    plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5")
+    plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10")
 
-    # 畫線（歷史部分）
-    plt.plot(combined['date'], combined['Close'], label='Close')
-    plt.plot(combined['date'], combined['SMA_5'], label='SMA5')
-    plt.plot(combined['date'], combined['SMA_10'], label='SMA10')
+    # 畫預測線（也是交易日 → 保證接續）
+    plt.plot(df_future['date'], df_future['Pred_MA5'], '--', label="Pred MA5")
+    plt.plot(df_future['date'], df_future['Pred_MA10'], '--', label="Pred MA10")
 
-    # 畫線（未來預測）
-    plt.plot(combined['date'], combined['Pred_Close'], ':', label='Pred Close')
-    plt.plot(combined['date'], combined['Pred_MA5'], '--', label='Pred MA5')
-    plt.plot(combined['date'], combined['Pred_MA10'], '--', label='Pred MA10')
-
-    plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    # x 軸格式：只顯示交易日，不是每天
+    plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
     plt.gcf().autofmt_xdate(rotation=45)
+
     plt.legend()
-    plt.title("2301.TW 歷史 + 預測（全部時間軸連續，線保證接起來）")
+    plt.title("2301.TW 歷史 + 預測（僅交易日，線條完整接續）")
     plt.xlabel("Date")
     plt.ylabel("Price")
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
+
+    results_dir = "results"
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    file_path = f"{results_dir}/{today_str}_future.png"
+    plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print("📌 圖片已儲存：", save_path)
+    print("📌 圖片已儲存：", file_path)
+
 
 
 # ---------------- 主流程 ----------------
