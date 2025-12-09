@@ -313,18 +313,15 @@ def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df):
 
 # ============================ 📈 畫圖（每日刻度 + 從今天開始） ============================
 def plot_all(df_real, df_future):
-    # 將 index 當作日期
     df_real['date'] = pd.to_datetime(df_real.index)
     df_future['date'] = pd.to_datetime(df_future['date'])
 
-    # 取最後一天歷史資料的前一天
-    last_hist_idx = df_real.index.get_loc(df_real.index[-1])
-    start_idx = max(0, last_hist_idx - 1)  # 確保不越界
-    df_plot_real = df_real.iloc[start_idx:]
+    # 直接取最後一天歷史資料開始畫
+    df_plot_real = df_real.iloc[-1:]  # 只取最後一天
 
     plt.figure(figsize=(12,6))
 
-    # 畫前一天的實線：Close / SMA5 / SMA10
+    # 畫最後一天的實線：Close / SMA5 / SMA10
     plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close", color="blue", linestyle='-')
     plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5", color="green", linestyle='-')
     plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10", color="orange", linestyle='-')
@@ -350,8 +347,6 @@ def plot_all(df_real, df_future):
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"📌 圖片已儲存：{file_path}")
-
-
 
 # ============================ ▶️ 主流程 ============================
 if __name__ == "__main__":
