@@ -312,12 +312,15 @@ def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df):
 
 
 # ============================ 📈 畫圖（每日刻度 + 從今天開始） ============================
+import pytz
+
 def plot_all(df_real, df_future):
     df_real['date'] = pd.to_datetime(df_real.index)
     df_future['date'] = pd.to_datetime(df_future['date'])
 
-    # 取得今天日期
-    today = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
+    # 取得今天日期，並加上與 df_real 相同的時區
+    tz = df_real['date'].dt.tz  # Asia/Taipei
+    today = pd.Timestamp(datetime.now()).tz_localize(tz)
 
     # 找出歷史資料中最接近今天的那一天
     last_hist_date = df_real[df_real['date'] <= today]['date'].max()
