@@ -9,7 +9,7 @@ on:
     - cron: '11 6 * * *'
 
 permissions:
-  contents: write   # ⭐ 允許 git push
+  contents: write
 
 jobs:
   run_program:
@@ -33,7 +33,8 @@ jobs:
             yfinance \
             matplotlib \
             pandas \
-            numpy
+            numpy \
+            scikit-learn   # ⭐ 加回來
 
       - name: Run stock prediction program
         env:
