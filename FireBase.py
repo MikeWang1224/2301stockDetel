@@ -163,12 +163,9 @@ def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df, future_days=10):
 # ============================ 📈 畫圖 ============================
 def plot_all(df_real, df_future, hist_days=30):
     df_real = df_real.copy()
-    # 移除時區，避免與 naive datetime 比較出錯
-    if df_real.index.tz is not None:
-        df_real['date'] = df_real.index.tz_convert(None)
-    else:
-        df_real['date'] = pd.to_datetime(df_real.index)
-
+    # ✅ 直接轉 datetime 並移除時區
+    df_real['date'] = pd.to_datetime(df_real.index).tz_localize(None)
+    
     df_future = df_future.copy()
     df_future['date'] = pd.to_datetime(df_future['date'])
 
@@ -181,7 +178,6 @@ def plot_all(df_real, df_future, hist_days=30):
     plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close", color="blue")
     plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5", color="green")
     plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10", color="orange")
-
     plt.plot(df_future['date'], df_future['Pred_MA5'], '--', label="Pred MA5", color="lime")
     plt.plot(df_future['date'], df_future['Pred_MA10'], '--', label="Pred MA10", color="red")
 
@@ -204,6 +200,7 @@ def plot_all(df_real, df_future, hist_days=30):
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"📌 圖片已儲存：{file_path}")
+
 
 
 
