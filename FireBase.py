@@ -196,51 +196,57 @@ def plot_all(df_real, df_future, hist_days=60):
     # 取最近 hist_days 個交易日
     df_plot_real = df_real.tail(hist_days)
 
-    # df_future 已為商業日，但轉 datetime
+    # df_future 已為交易日，轉 datetime
     df_future = df_future.copy()
     df_future['date'] = pd.to_datetime(df_future['date'])
 
     plt.figure(figsize=(16,8))
 
-    # 畫歷史線（交易日連接）
+    # 畫歷史線（只用交易日）
     plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close")
     if 'SMA_5' in df_plot_real.columns:
         plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5")
     if 'SMA_10' in df_plot_real.columns:
         plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10")
 
-    # 將最後一天歷史收盤價接到預測線的起點，確保連續
+    # 將最後一天歷史收盤價接到預測線的起點
     last_hist_date = df_plot_real['date'].iloc[-1]
     last_hist_close = df_plot_real['Close'].iloc[-1]
+    last_sma5 = df_plot_real['SMA_5'].iloc[-1] if 'SMA_5' in df_plot_real.columns else last_hist_close
+    last_sma10 = df_plot_real['SMA_10'].iloc[-1] if 'SMA_10' in df_plot_real.columns else last_hist_close
 
-    df_future_plot = df_future.copy()
-    df_future_plot.loc[-1] = [last_hist_date, last_hist_close,
-                              df_plot_real['SMA_5'].iloc[-1] if 'SMA_5' in df_plot_real.columns else last_hist_close,
-                              df_plot_real['SMA_10'].iloc[-1] if 'SMA_10' in df_plot_real.columns else last_hist_close]
-    df_future_plot = df_future_plot.sort_values('date').reset_index(drop=True)
+    # 把最後一天加入預測 dataframe 開頭，確保連線
+    df_future_plot = pd.concat([
+        pd.DataFrame([{
+            "date": last_hist_date,
+            "Pred_Close": last_hist_close,
+            "Pred_MA5": last_sma5,
+            "Pred_MA10": last_sma10
+        }]),
+        df_future
+    ], ignore_index=True)
 
-    # 畫預測線（連續）
+    # 畫預測線（只顯示交易日）
     plt.plot(df_future_plot['date'], df_future_plot['Pred_Close'], ':', label='Pred Close')
     plt.plot(df_future_plot['date'], df_future_plot['Pred_MA5'], '--', label="Pred MA5")
     plt.plot(df_future_plot['date'], df_future_plot['Pred_MA10'], '--', label="Pred MA10")
 
-    # X 軸每天一個刻度
-    plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=1))
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-    plt.gcf().autofmt_xdate(rotation=45)
+    # X 軸顯示日期，但只用交易日，避免週末假日空白
+    plt.xticks(df_future_plot['date'], [d.strftime('%m-%d') for d in df_future_plot['date']], rotation=45)
 
     plt.legend()
-    plt.title("2301.TW 歷史 + 預測（每日）")
+    plt.title("2301.TW 歷史 + 預測（交易日）")
     plt.xlabel("Date")
     plt.ylabel("Price")
 
     results_dir = "results"
     os.makedirs(results_dir, exist_ok=True)
     today_str = datetime.now().strftime("%Y-%m-%d")
-    file_path = f"{results_dir}/{today_str}_future_daily.png"
+    file_path = f"{results_dir}/{today_str}_future_trade_days.png"
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print("📌 圖片已儲存：", file_path)
+
 
 # ---------------- 主流程 ----------------
 if __name__ == "__main__":
