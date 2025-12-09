@@ -4,10 +4,10 @@
 🔥 功能：
   - 抓取股價
   - 計算技術指標
-  - 寫入 Firestore
+  - 更新 Firestore 今天資料
   - 訓練 LSTM
   - 預測未來 MA5 與 MA10
-  - 畫圖顯示（每日刻度＋從今天開始畫）
+  - 畫圖顯示（從今天開始）
 """
 
 import os, json
@@ -162,8 +162,8 @@ def predict_future_ma(model, scaler_x, scaler_y, X_scaled, df, future_days=10):
 
 # ============================ 📈 畫圖 ============================
 def plot_all(df_real, df_future, hist_days=30):
-    # 移除時區
-    df_real['date'] = pd.to_datetime(df_real.index).dt.tz_localize(None)
+    df_real = df_real.copy()
+    df_real['date'] = df_real.index.tz_localize(None)  # ✅ 修正時區問題
     df_future['date'] = pd.to_datetime(df_future['date'])
 
     today = pd.Timestamp(datetime.now().date())
@@ -174,7 +174,6 @@ def plot_all(df_real, df_future, hist_days=30):
     plt.plot(df_plot_real['date'], df_plot_real['Close'], label="Close", color="blue")
     plt.plot(df_plot_real['date'], df_plot_real['SMA_5'], label="SMA5", color="green")
     plt.plot(df_plot_real['date'], df_plot_real['SMA_10'], label="SMA10", color="orange")
-
     plt.plot(df_future['date'], df_future['Pred_MA5'], '--', label="Pred MA5", color="lime")
     plt.plot(df_future['date'], df_future['Pred_MA10'], '--', label="Pred MA10", color="red")
 
