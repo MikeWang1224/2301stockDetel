@@ -5,8 +5,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '01 21 * * *'
-    - cron: '11 6 * * *'
+    - cron: '0 6 * * *'  # 每天 UTC 06:00 = 台灣 14:00
 
 permissions:
   contents: write
@@ -35,7 +34,7 @@ jobs:
             pandas \
             numpy \
             scikit-learn \
-            tensorflow  # ⭐ 加回來
+            tensorflow
 
       - name: Run stock prediction program
         env:
