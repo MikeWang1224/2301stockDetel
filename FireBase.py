@@ -295,6 +295,9 @@ def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=60
     offset = len(df_real_plot) - 1
     x_future = [offset + i for i in range(len(df_future_plot))]
     plt.plot(x_future, df_future_plot['Pred_Close'].values, linestyle=':', marker='o', label="Pred Close")
+    # --- 新增：在預測收盤價點旁標示數字 ---
+    for xf, val in zip(x_future, df_future_plot['Pred_Close'].values):
+        plt.text(xf, val, f"{val:.2f}", fontsize=8, ha='left', va='bottom')
     plt.plot(x_future, df_future_plot['Pred_MA5'].values, linestyle='--', label="Pred MA5")
     plt.plot(x_future, df_future_plot['Pred_MA10'].values, linestyle='--', label="Pred MA10")
 
