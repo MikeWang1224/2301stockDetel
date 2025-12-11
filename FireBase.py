@@ -9,6 +9,7 @@
 新增：
  - baseline 評估（last-close, last-SMA5 fallback, simple random-walk returns）
  - 圖片上傳至 Firebase Storage，並把 image_url 寫回 Firestore
+ - 在預測收盤價的點旁標示數字（使用 annotate，帶白色背景框，避免被線條覆蓋）
 """
 import os, json
 import firebase_admin
@@ -262,6 +263,7 @@ def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=60
     修正：
       - 確保預測序列的日期與 labels 對齊（包含起始已知日期）
       - pred_table 與 labels 都使用同一份 df_future_plot（包含起始點）
+      - 在預測收盤價旁加入數字標示（annotate + bbox white）
     """
     df_real_plot = df_real.copy().tail(10)  # 顯示最近 10 日
 
@@ -294,10 +296,22 @@ def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=60
     # 預測（從最後一個歷史索引開始）
     offset = len(df_real_plot) - 1
     x_future = [offset + i for i in range(len(df_future_plot))]
-    plt.plot(x_future, df_future_plot['Pred_Close'].values, linestyle=':', marker='o', label="Pred Close")
-    # --- 新增：在預測收盤價點旁標示數字 ---
+    plt.plot(x_future, df_future_plot['Pred_Close'].values, linestyle=':', marker='o', color='red', label="Pred Close")
+
+    # 在預測收盤價旁標示數字（使用 annotate 並加白底，避免被線遮住）
     for xf, val in zip(x_future, df_future_plot['Pred_Close'].values):
-        plt.text(xf, val, f"{val:.2f}", fontsize=8, ha='left', va='bottom')
+        plt.annotate(
+            f"{val:.2f}",
+            xy=(xf, val),
+            xytext=(6, 6),  # offset in points
+            textcoords='offset points',
+            fontsize=8,
+            ha='left',
+            va='bottom',
+            color='red',
+            bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='none', alpha=0.7)
+        )
+
     plt.plot(x_future, df_future_plot['Pred_MA5'].values, linestyle='--', label="Pred MA5")
     plt.plot(x_future, df_future_plot['Pred_MA10'].values, linestyle='--', label="Pred MA10")
 
@@ -310,7 +324,6 @@ def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=60
         labels.append(pd.Timestamp(d).strftime('%m-%d'))
 
     ticks = list(range(len(labels)))
-    # Ensure ticks cover plotted range
     plt.xticks(ticks=ticks, labels=labels, rotation=45)
     plt.xlim(0, max(ticks))
 
@@ -336,7 +349,6 @@ def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=60
                 blob.make_public()
                 public_url = blob.public_url
             except Exception:
-                # 無法 make public（多為 storage policy）；仍回傳 blob.public_url 若可取得
                 try:
                     public_url = blob.public_url
                 except Exception:
