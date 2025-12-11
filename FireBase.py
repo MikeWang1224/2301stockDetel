@@ -8,10 +8,12 @@
  - 抓資料 -> 計算指標 -> 寫回 Firestore -> LSTM 訓練/預測 -> 畫圖 -> 寫入預測到 Firestore
 新增：
  - baseline 評估（last-close, last-SMA5 fallback, simple random-walk returns）
+ - 圖片上傳至 Firebase Storage，並把 image_url 寫回 Firestore
 """
 import os, json
 import firebase_admin
 from firebase_admin import credentials, firestore
+from google.cloud import storage
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -26,17 +28,28 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import math
 import random
 
-# ---------------- Firebase 初始化 ----------------
+# ---------------- Firebase 初始化（含 Storage） ----------------
 key_dict = json.loads(os.environ.get("FIREBASE", "{}"))
+db = None
+bucket = None
+storage_client = None
+
 if key_dict:
     cred = credentials.Certificate(key_dict)
     try:
         firebase_admin.get_app()
     except Exception:
-        firebase_admin.initialize_app(cred)
+        # initialize_app with storageBucket ensures credentials scoped for storage operations
+        firebase_admin.initialize_app(cred, {"storageBucket": f"{key_dict.get('project_id')}.appspot.com"})
     db = firestore.client()
+    try:
+        # google-cloud-storage uses application default credentials; the service account JSON loaded above
+        storage_client = storage.Client.from_service_account_info(key_dict)
+        bucket = storage_client.bucket(f"{key_dict.get('project_id')}.appspot.com")
+    except Exception as e:
+        print("⚠️ Storage client 初始化失敗，Storage 功能停用:", e)
+        bucket = None
 else:
-    db = None
     print("⚠️ FIREBASE env 未設定 — 會略過上傳步驟")
 
 # ---------------- 傳統技術指標：SMA / RSI / KD / MACD ----------------
@@ -78,7 +91,7 @@ def add_basic_indicators(df):
 
     return df
 
-# ---------------- 其他特徵工程函式 (你原本的) ----------------
+# ---------------- 其他特徵工程函式 ----------------
 def add_technical_features(df):
     df = df.copy()
     # SMA (already computed in basic but keep for compatibility)
@@ -241,25 +254,28 @@ def compute_pred_ma_from_pred_closes(last_known_closes, pred_closes):
         results.append((pc, ma5, ma10))
     return results
 
-# ---------------- 圖表（只顯示 10 日歷史） ----------------
-def plot_all(df_real, df_future, hist_days=60):
-    df_real = df_real.copy()
-    df_real = df_real.tail(10)  # 僅顯示最近 10 根交易日
+# ---------------- 繪圖 + 上傳 Storage（取代原 plot_all） ----------------
+def plot_and_upload_to_storage(df_real, df_future, bucket_obj=None, hist_days=60):
+    """
+    畫圖並上傳至 Firebase Storage（如果 bucket_obj 提供）。
+    回傳 public image url 或 None。
+    """
+    df_real_plot = df_real.copy().tail(10)  # 顯示最近 10 日
 
     plt.figure(figsize=(16,8))
 
-    # 歷史線
-    x_real = range(len(df_real))
-    plt.plot(x_real, df_real['Close'], label="Close")
-    if 'SMA_5' in df_real.columns:
-        plt.plot(x_real, df_real['SMA_5'], label="SMA5")
-    if 'SMA_10' in df_real.columns:
-        plt.plot(x_real, df_real['SMA_10'], label="SMA10")
+    # 歷史
+    x_real = range(len(df_real_plot))
+    plt.plot(x_real, df_real_plot['Close'], label="Close")
+    if 'SMA_5' in df_real_plot.columns:
+        plt.plot(x_real, df_real_plot['SMA_5'], label="SMA5")
+    if 'SMA_10' in df_real_plot.columns:
+        plt.plot(x_real, df_real_plot['SMA_10'], label="SMA10")
 
-    # 將預測首點與歷史最後一點連接
-    last_hist_close = df_real['Close'].iloc[-1]
-    last_sma5 = df_real['SMA_5'].iloc[-1] if 'SMA_5' in df_real.columns else last_hist_close
-    last_sma10 = df_real['SMA_10'].iloc[-1] if 'SMA_10' in df_real.columns else last_hist_close
+    # 建立和連接預測序列
+    last_hist_close = df_real_plot['Close'].iloc[-1]
+    last_sma5 = df_real_plot['SMA_5'].iloc[-1] if 'SMA_5' in df_real_plot.columns else last_hist_close
+    last_sma10 = df_real_plot['SMA_10'].iloc[-1] if 'SMA_10' in df_real_plot.columns else last_hist_close
 
     df_future_plot = pd.concat([
         pd.DataFrame([{
@@ -267,16 +283,16 @@ def plot_all(df_real, df_future, hist_days=60):
             "Pred_MA5": last_sma5,
             "Pred_MA10": last_sma10
         }]),
-        df_future
+        df_future.reset_index(drop=True)
     ], ignore_index=True)
 
-    x_future = range(len(df_real)-1, len(df_real)-1 + len(df_future_plot))
+    x_future = range(len(df_real_plot)-1, len(df_real_plot)-1 + len(df_future_plot))
     plt.plot(x_future, df_future_plot['Pred_Close'], ':', label="Pred Close")
     plt.plot(x_future, df_future_plot['Pred_MA5'], '--', label="Pred MA5")
     plt.plot(x_future, df_future_plot['Pred_MA10'], '--', label="Pred MA10")
 
-    # X 軸日期刻度
-    all_dates = list(df_real.index) + list(df_future['date'])
+    # X 軸標籤（日期）
+    all_dates = list(df_real_plot.index) + list(df_future['date'])
     plt.xticks(
         ticks=range(len(all_dates)),
         labels=[pd.Timestamp(d).strftime('%m-%d') for d in all_dates],
@@ -290,10 +306,31 @@ def plot_all(df_real, df_future, hist_days=60):
     plt.ylabel("Price")
 
     os.makedirs("results", exist_ok=True)
-    file_path = f"results/{datetime.now().strftime('%Y-%m-%d')}_future_trade_days.png"
+    file_name = f"{datetime.now().strftime('%Y-%m-%d')}_future_trade_days.png"
+    file_path = os.path.join("results", file_name)
     plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close()
     print("📌 圖片已儲存：", file_path)
+
+    # 若提供 bucket，則上傳並公開
+    if bucket_obj is not None:
+        try:
+            blob = bucket_obj.blob(f"LSTM_Pred_Images/{file_name}")
+            blob.upload_from_filename(file_path)
+            # make public (depends on your Storage rules; if not desired, remove)
+            try:
+                blob.make_public()
+            except Exception:
+                # 某些專案不允許 make_public；可以保留私有然後使用 signed url 或 firebase rules 控制
+                pass
+            public_url = blob.public_url
+            print("🔥 圖片已上傳至 Storage：", public_url)
+            return public_url
+        except Exception as e:
+            print("❌ 上傳 Storage 發生錯誤：", e)
+            return None
+
+    return None
 
 # ---------------- Baseline / MA helper functions ----------------
 def compute_metrics(y_true, y_pred):
@@ -410,8 +447,9 @@ if __name__ == "__main__":
         "Pred_MA10": [r[2] for r in results]
     })
 
-    # 繪圖
-    plot_all(df, df_future)
+    # 繪圖（改為上傳 Storage）
+    image_url = plot_and_upload_to_storage(df, df_future, bucket_obj=bucket)
+    print("Image URL:", image_url)
 
     print(df_future)
 
@@ -431,15 +469,9 @@ if __name__ == "__main__":
         except Exception:
             baselineB = baselineA.copy()
     else:
-        # 嘗試從原始 df 抓取對應最後的 SMA5（若可能），否則退回 baselineA
-        try:
-            # 對每個 X_test sample 我們無法直接從 df 對齊 index（安全退回）
-            baselineB = baselineA.copy()
-        except Exception:
-            baselineB = baselineA.copy()
+        baselineB = baselineA.copy()
 
-    # Baseline C: simple random-walk on returns (使用每個 sample 最後已知日的 1-step return 作為未來 returns 的 sample)
-    # 這是一個非常簡單的 stochastic baseline：我們用最後一天的 RET_1 作為未來每一步的 returns，然後累積回價格
+    # Baseline C: simple random-walk on returns
     last_ret_1 = X_test[:, -1, features.index('RET_1')] if 'RET_1' in features else None
     if last_ret_1 is not None:
         baselineC = np.zeros_like(baselineA)
@@ -464,28 +496,24 @@ if __name__ == "__main__":
     print("=== Per-step MAE (Baseline B: last SMA5/fallback) ===\n", np.round(maes_bB,4))
     print("=== Per-step MAE (Baseline C: simple returns) ===\n", np.round(maes_bC,4))
 
-    print("\nAvg MAE model:", np.round(maes_model.mean(),4), 
+    print("\nAvg MAE model:", np.round(maes_model.mean(),4),
           "baselineA:", np.round(maes_bA.mean(),4), "baselineB:", np.round(maes_bB.mean(),4),
           "baselineC:", np.round(maes_bC.mean(),4))
-    print("Avg RMSE model:", np.round(rmses_model.mean(),4), 
+    print("Avg RMSE model:", np.round(rmses_model.mean(),4),
           "baselineA:", np.round(rmses_bA.mean(),4))
 
-    # ---------- Evaluate effect on MA5 / MA10 ----------
+    # Evaluate effect on MA5 / MA10
     last_closes_window = X_test[:, :, 0]  # shape (n_samples, LOOKBACK)
 
-    # model MA predictions
     model_MA5 = compute_ma_from_predictions(last_closes_window, pred, ma_period=5)
     model_MA10 = compute_ma_from_predictions(last_closes_window, pred, ma_period=10)
 
-    # baselineA MA predictions
     bA_MA5 = compute_ma_from_predictions(last_closes_window, baselineA, ma_period=5)
     bA_MA10 = compute_ma_from_predictions(last_closes_window, baselineA, ma_period=10)
 
-    # baselineB MA predictions
     bB_MA5 = compute_ma_from_predictions(last_closes_window, baselineB, ma_period=5)
     bB_MA10 = compute_ma_from_predictions(last_closes_window, baselineB, ma_period=10)
 
-    # true MA from ground-truth y_test
     true_MA5 = compute_true_ma(last_closes_window, y_test, ma_period=5)
     true_MA10 = compute_true_ma(last_closes_window, y_test, ma_period=10)
 
@@ -497,9 +525,9 @@ if __name__ == "__main__":
     mae_bA_MA10 = np.mean(np.abs(bA_MA10 - true_MA10))
     mae_bB_MA10 = np.mean(np.abs(bB_MA10 - true_MA10))
 
-    print("\nMAE on derived MA5 -> model:", np.round(mae_model_MA5,4), 
+    print("\nMAE on derived MA5 -> model:", np.round(mae_model_MA5,4),
           "baselineA:", np.round(mae_bA_MA5,4), "baselineB:", np.round(mae_bB_MA5,4))
-    print("MAE on derived MA10 -> model:", np.round(mae_model_MA10,4), 
+    print("MAE on derived MA10 -> model:", np.round(mae_model_MA10,4),
           "baselineA:", np.round(mae_bA_MA10,4), "baselineB:", np.round(mae_bB_MA10,4))
 
     print("===== Baseline 評估結束 =====\n")
@@ -517,4 +545,17 @@ if __name__ == "__main__":
                 })
             except Exception as e:
                 print("寫入預測到 Firestore 發生錯誤：", e)
+        # 同時寫入 metadata doc（包含 image_url）
+        try:
+            meta_doc = {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "image_url": image_url,
+                "pred_table": [row for _, row in df_future.iterrows()],
+                "update_time": datetime.now().isoformat()
+            }
+            db.collection("NEW_stock_data_liteon_preds_meta").document(datetime.now().strftime("%Y-%m-%d")).set(meta_doc)
+        except Exception as e:
+            print("寫入預測 metadata 到 Firestore 發生錯誤：", e)
+
         print("🔥 預測寫入 Firestore 完成")
+
