@@ -5,7 +5,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 6 * * *'  # 每天 UTC 06:00 = 台灣 14:00
+    - cron: '55 5 * * *'  # 每天 UTC 05:55 = 台灣 13:55
 
 permissions:
   contents: write
