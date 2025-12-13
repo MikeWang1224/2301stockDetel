@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-FireBase.py
-- Firestore 讀 OHLCV
-- 技術指標即時計算
-- 假日補今天
-- LSTM multi-step（已修正：anchor + recursive）
-- 畫圖輸出 results
+FireBase_LSTM_v2.py
+- Firestore 讀 OHLCV + 已算好技術指標
+- 不重算指標（避免分佈錯亂）
+- 預測 log return（多步）
+- 價格由 return 還原
+- 畫圖與輸出：完全沿用原版（不動）
 """
 
 import os, json
-import numpy as np 
+import numpy as np
 import pandas as pd
 from datetime import datetime
 import matplotlib.pyplot as plt
@@ -62,58 +62,30 @@ def ensure_today_row(df):
         print(f"⚠️ 今日無資料，使用 {last_date.date()} 補今日")
     return df.sort_index()
 
-# ================= 技術指標 =================
-def add_features(df):
-    df = df.copy()
-
-    df["RET_1"] = df["Close"].pct_change()
-    df["LOG_RET_1"] = np.log(df["Close"] / df["Close"].shift())
-
-    df["SMA5"] = df["Close"].rolling(5).mean()
-    df["SMA10"] = df["Close"].rolling(10).mean()
-    df["Close_minus_SMA5"] = df["Close"] - df["SMA5"]
-    df["SMA5_minus_SMA10"] = df["SMA5"] - df["SMA10"]
-
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - df["Close"].shift()).abs(),
-        (df["Low"] - df["Close"].shift()).abs()
-    ], axis=1).max(axis=1)
-    df["ATR_14"] = tr.rolling(14).mean()
-
-    ma20 = df["Close"].rolling(20).mean()
-    std20 = df["Close"].rolling(20).std()
-    df["BB_width"] = (2 * std20) / ma20
-
-    direction = np.sign(df["Close"].diff()).fillna(0)
-    df["OBV"] = (direction * df["Volume"]).cumsum()
-    df["OBV_SMA_20"] = df["OBV"].rolling(20).mean()
-    df["Vol_SMA_5"] = df["Volume"].rolling(5).mean()
-
-    return df.dropna()
-
-# ================= LSTM helpers =================
+# ================= Sequence（預測 log return） =================
 def create_sequences(df, features, steps=10, window=60):
     X, y = [], []
+
     data = df[features].values
-    closes = df["Close"].values
-    for i in range(window, len(df) - steps + 1):
-        X.append(data[i-window:i])
-        y.append(closes[i:i+steps])
+    logret = np.log(df["Close"] / df["Close"].shift())
+
+    for i in range(window, len(df) - steps):
+        X.append(data[i - window:i])
+        y.append(logret.iloc[i:i + steps].values)
+
     return np.array(X), np.array(y)
 
+# ================= LSTM =================
 def build_lstm(input_shape, steps):
     m = Sequential([
-        LSTM(128, return_sequences=True, input_shape=input_shape),
-        Dropout(0.2),
-        LSTM(64),
-        Dropout(0.2),
+        LSTM(64, input_shape=input_shape),
+        Dropout(0.1),
         Dense(steps)
     ])
-    m.compile(optimizer="adam", loss="mae")
+    m.compile(optimizer="adam", loss="huber")
     return m
 
-# ================= 畫圖 =================
+# ================= 畫圖（完全不動） =================
 def plot_and_save(df_hist, future_df):
     hist = df_hist.tail(10)
 
@@ -157,7 +129,7 @@ def plot_and_save(df_hist, future_df):
     ax.set_xticklabels(all_dates, rotation=45, ha="right")
 
     ax.legend()
-    ax.set_title("2301.TW LSTM 預測（修正後，穩定版）")
+    ax.set_title("2301.TW LSTM 預測（Return-based 穩定版）")
 
     os.makedirs("results", exist_ok=True)
     plt.savefig(f"results/{datetime.now():%Y-%m-%d}_pred.png",
@@ -172,16 +144,22 @@ if __name__ == "__main__":
 
     df = load_df_from_firestore(TICKER)
     df = ensure_today_row(df)
-    df = add_features(df)
 
+    # Firebase 內建指標（不重算）
     FEATURES = [
-        "Close", "Volume",
-        "RET_1", "LOG_RET_1",
-        "Close_minus_SMA5", "SMA5_minus_SMA10",
-        "ATR_14", "BB_width",
-        "OBV", "OBV_SMA_20",
-        "Vol_SMA_5"
+        "Close",
+        "Volume",
+        "RSI",
+        "MACD",
+        "K",
+        "D",
+        "ATR_14"
     ]
+
+    # SMA 只為畫圖用
+    df["SMA5"] = df["Close"].rolling(5).mean()
+    df["SMA10"] = df["Close"].rolling(10).mean()
+    df = df.dropna()
 
     X, y = create_sequences(df, FEATURES, STEPS, LOOKBACK)
     split = int(len(X) * 0.85)
@@ -189,40 +167,43 @@ if __name__ == "__main__":
     X_tr, X_te = X[:split], X[split:]
     y_tr = y[:split]
 
+    # ===== scaler（修正 leakage）=====
     sx = MinMaxScaler()
-    X_tr_s = sx.fit_transform(X_tr.reshape(-1, X_tr.shape[-1])).reshape(X_tr.shape)
-    X_te_s = sx.transform(X_te.reshape(-1, X_te.shape[-1])).reshape(X_te.shape)
+    sx.fit(df[FEATURES].iloc[:split + LOOKBACK])
 
-    sy = MinMaxScaler()
-    y_tr_s = sy.fit_transform(y_tr)
+    def scale_X(X):
+        n, t, f = X.shape
+        return sx.transform(X.reshape(-1, f)).reshape(n, t, f)
+
+    X_tr_s = scale_X(X_tr)
+    X_te_s = scale_X(X_te)
 
     model = build_lstm((LOOKBACK, len(FEATURES)), STEPS)
     model.fit(
-        X_tr_s, y_tr_s,
+        X_tr_s, y_tr,
         epochs=50,
         batch_size=32,
         verbose=2,
         callbacks=[EarlyStopping(patience=6, restore_best_weights=True)]
     )
 
-    raw_preds = sy.inverse_transform(model.predict(X_te_s))[-1]
+    # ===== 預測 =====
+    raw_returns = model.predict(X_te_s)[-1]
 
-    # ===== 🔑 關鍵修正：Anchor + Recursive =====
     today = pd.Timestamp(datetime.now().date())
     last_trade_date = df.index[df.index < today][-1]
     last_close = df.loc[last_trade_date, "Close"]
 
-    preds = []
-    prev = last_close
-    for p in raw_preds:
-        # 防止第一根亂跳
-        p = 0.7 * prev + 0.3 * p
-        preds.append(p)
-        prev = p
+    prices = []
+    price = last_close
+    for r in raw_returns:
+        price *= np.exp(r)
+        prices.append(price)
 
     seq = df.loc[:last_trade_date, "Close"].iloc[-10:].tolist()
     future = []
-    for p in preds:
+
+    for p in prices:
         seq.append(p)
         future.append({
             "Pred_Close": p,
