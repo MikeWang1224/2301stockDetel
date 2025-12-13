@@ -2,7 +2,7 @@ name: Run Liteon Stock Program
 
 on:
   push:
-    branches:
+    branches: 
       - main
   schedule:
     # 每天 UTC 05:50 = 台灣時間 13:50
