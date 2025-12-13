@@ -145,12 +145,12 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     X_last = X_te_s[-1:]
     y_true = y_te[-1]
 
-    pred_ret = model.predict(X_last)[0]
+    pred_ret = model.predict(X_last, verbose=0)[0]
 
     # 對應的實際交易日（最後 steps 天）
     dates = df.index[-steps:]
 
-    # 對應起始價格（回測起點前一天）
+    # 回測起點（前一交易日）
     start_price = df.loc[dates[0] - BDay(1), "Close"]
 
     true_prices = []
@@ -165,14 +165,25 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
         true_prices.append(p_true)
         pred_prices.append(p_pred)
 
-    mae = np.mean(np.abs(np.array(true_prices) - np.array(pred_prices)))
-    rmse = np.sqrt(np.mean((np.array(true_prices) - np.array(pred_prices)) ** 2))
+    true_prices = np.array(true_prices)
+    pred_prices = np.array(pred_prices)
+
+    mae = np.mean(np.abs(true_prices - pred_prices))
+    rmse = np.sqrt(np.mean((true_prices - pred_prices) ** 2))
 
     plt.figure(figsize=(12,6))
     plt.plot(dates, true_prices, label="Actual Close")
     plt.plot(dates, pred_prices, "--o", label="Pred Close")
+
+    # ✅ 關鍵修正：強制顯示交易日
+    plt.xticks(
+        ticks=dates,
+        labels=[d.strftime("%Y-%m-%d") for d in dates],
+        rotation=45,
+        ha="right"
+    )
+
     plt.title(f"Backtest Prediction | MAE={mae:.2f}, RMSE={rmse:.2f}")
-    plt.xticks(rotation=45)
     plt.legend()
     plt.grid(True)
 
@@ -183,6 +194,7 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
         bbox_inches="tight"
     )
     plt.close()
+
 
 
 # ================= Main =================
