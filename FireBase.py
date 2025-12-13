@@ -137,33 +137,29 @@ def plot_and_save(df_hist, future_df):
                 dpi=300, bbox_inches="tight")
     plt.close()
 
-# ================= 新增：回測誤差圖 =================
-def plot_backtest_error(df, X_te_s, y_te, model, steps):
+# ================= 回測誤差圖（時間軸已對齊） =================
+def plot_backtest_error(df, X_te_s, y_te, model, steps, split, lookback):
     """
-    使用測試集最後一筆，畫 Pred vs Actual（x 軸 = 交易日）
+    使用「測試集最後一個 window」做回測
     """
+
+    anchor_idx = split + lookback - 1
+
     X_last = X_te_s[-1:]
     y_true = y_te[-1]
-
     pred_ret = model.predict(X_last, verbose=0)[0]
 
-    # 對應的實際交易日（最後 steps 天）
-    dates = df.index[-steps:]
+    dates = df.index[anchor_idx + 1 : anchor_idx + 1 + steps]
+    start_price = df["Close"].iloc[anchor_idx]
 
-    # 回測起點（前一交易日）
-    start_price = df.loc[dates[0] - BDay(1), "Close"]
+    true_prices, pred_prices = [], []
+    p_t, p_p = start_price, start_price
 
-    true_prices = []
-    pred_prices = []
-
-    p_true = start_price
-    p_pred = start_price
-
-    for r_t, r_p in zip(y_true, pred_ret):
-        p_true *= np.exp(r_t)
-        p_pred *= np.exp(r_p)
-        true_prices.append(p_true)
-        pred_prices.append(p_pred)
+    for rt, rp in zip(y_true, pred_ret):
+        p_t *= np.exp(rt)
+        p_p *= np.exp(rp)
+        true_prices.append(p_t)
+        pred_prices.append(p_p)
 
     true_prices = np.array(true_prices)
     pred_prices = np.array(pred_prices)
@@ -175,7 +171,6 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     plt.plot(dates, true_prices, label="Actual Close")
     plt.plot(dates, pred_prices, "--o", label="Pred Close")
 
-    # ✅ 關鍵修正：強制顯示交易日
     plt.xticks(
         ticks=dates,
         labels=[d.strftime("%Y-%m-%d") for d in dates],
@@ -195,8 +190,6 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     )
     plt.close()
 
-
-
 # ================= Main =================
 if __name__ == "__main__":
     TICKER = "2301.TW"
@@ -207,16 +200,9 @@ if __name__ == "__main__":
     df = ensure_today_row(df)
 
     FEATURES = [
-        "Close",
-        "Volume",
-        "RSI",
-        "MACD",
-        "K",
-        "D",
-        "ATR_14"
+        "Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14"
     ]
 
-    # SMA 只為畫圖
     df["SMA5"] = df["Close"].rolling(5).mean()
     df["SMA10"] = df["Close"].rolling(10).mean()
     df = df.dropna()
@@ -246,15 +232,14 @@ if __name__ == "__main__":
         callbacks=[EarlyStopping(patience=6, restore_best_weights=True)]
     )
 
-    # ===== 預測未來 =====
+    # ===== 未來預測 =====
     raw_returns = model.predict(X_te_s)[-1]
 
     today = pd.Timestamp(datetime.now().date())
     last_trade_date = df.index[df.index < today][-1]
     last_close = df.loc[last_trade_date, "Close"]
 
-    prices = []
-    price = last_close
+    prices, price = [], last_close
     for r in raw_returns:
         price *= np.exp(r)
         prices.append(price)
@@ -277,4 +262,4 @@ if __name__ == "__main__":
     )
 
     plot_and_save(df, future_df)
-    plot_backtest_error(df, X_te_s, y_te, model, STEPS)
+    plot_backtest_error(df, X_te_s, y_te, model, STEPS, split, LOOKBACK)
