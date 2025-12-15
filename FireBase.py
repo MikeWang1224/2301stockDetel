@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-FireBase_LSTM_v2.py
+FireBase_Attention_LSTM.py
 - Firestore 讀 OHLCV + 已算好技術指標
-- 不重算指標（避免分佈錯亂）
-- 預測 log return（多步）
-- 價格由 return 還原
-- 原預測圖不動
-- 新增：預測回測誤差圖（Pred vs Actual）
+- 不重算指標
+- 預測 multi-step log return
+- Attention-LSTM（主流升級版）
 """
 
 import os, json
@@ -17,8 +15,11 @@ import matplotlib.pyplot as plt
 from pandas.tseries.offsets import BDay
 
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (
+    Input, LSTM, Dense, Dropout,
+    Attention, GlobalAveragePooling1D
+)
 from tensorflow.keras.callbacks import EarlyStopping
 
 # Firebase
@@ -63,13 +64,13 @@ def ensure_today_row(df):
         print(f"⚠️ 今日無資料，使用 {last_date.date()} 補今日")
     return df.sort_index()
 
-# ================= Sequence（預測 log return） =================
+# ================= Sequence =================
 def create_sequences(df, features, steps=10, window=60):
     X, y = [], []
 
     logret = np.log(df["Close"]).diff()
-    df = df.iloc[1:]          # 丟掉第一筆，避免 NaN
-    logret = logret.iloc[1:]  # 與 df 對齊
+    df = df.iloc[1:]
+    logret = logret.iloc[1:]
     data = df[features].values
 
     for i in range(window, len(df) - steps):
@@ -78,20 +79,29 @@ def create_sequences(df, features, steps=10, window=60):
 
     return np.array(X), np.array(y)
 
-# ================= LSTM =================
-def build_lstm(input_shape, steps):
-    m = Sequential([
-        LSTM(64, input_shape=input_shape),
-        Dropout(0.1),
-        Dense(steps)
-    ])
-    m.compile(optimizer="adam", loss="huber")
-    return m
+# ================= Attention-LSTM =================
+def build_attention_lstm(input_shape, steps):
+    inp = Input(shape=input_shape)
 
-# ================= 原預測圖（完全不動） =================
+    x = LSTM(64, return_sequences=True)(inp)
+    x = Dropout(0.1)(x)
+
+    # Self-Attention
+    attn = Attention()([x, x])
+    context = GlobalAveragePooling1D()(attn)
+
+    out = Dense(steps)(context)
+
+    model = Model(inp, out)
+    model.compile(
+        optimizer="adam",
+        loss="huber"
+    )
+    return model
+
+# ================= 原預測圖（不動） =================
 def plot_and_save(df_hist, future_df):
     hist = df_hist.tail(10)
-
     hist_dates = hist.index.strftime("%Y-%m-%d").tolist()
     future_dates = future_df["date"].dt.strftime("%Y-%m-%d").tolist()
 
@@ -130,36 +140,25 @@ def plot_and_save(df_hist, future_df):
 
     ax.set_xticks(np.arange(len(all_dates)))
     ax.set_xticklabels(all_dates, rotation=45, ha="right")
-
     ax.legend()
-    ax.set_title("2301.TW LSTM 預測（Return-based 穩定版）")
+    ax.set_title("2301.TW Attention-LSTM 預測")
 
     os.makedirs("results", exist_ok=True)
     plt.savefig(f"results/{datetime.now():%Y-%m-%d}_pred.png",
                 dpi=300, bbox_inches="tight")
     plt.close()
 
-# ================= 新增：回測誤差圖 =================
+# ================= 回測誤差圖（不動） =================
 def plot_backtest_error(df, X_te_s, y_te, model, steps):
-    """
-    使用測試集最後一筆，畫 Pred vs Actual（x 軸 = 交易日）
-    """
     X_last = X_te_s[-1:]
     y_true = y_te[-1]
 
     pred_ret = model.predict(X_last)[0]
-
-    # 對應的實際交易日（最後 steps 天）
     dates = df.index[-steps:]
-
-    # 對應起始價格（回測起點前一天）
     start_price = df.loc[dates[0] - BDay(1), "Close"]
 
-    true_prices = []
-    pred_prices = []
-
-    p_true = start_price
-    p_pred = start_price
+    true_prices, pred_prices = [], []
+    p_true = p_pred = start_price
 
     for r_t, r_p in zip(y_true, pred_ret):
         p_true *= np.exp(r_t)
@@ -173,7 +172,7 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     plt.figure(figsize=(12,6))
     plt.plot(dates, true_prices, label="Actual Close")
     plt.plot(dates, pred_prices, "--o", label="Pred Close")
-    plt.title(f"Backtest Prediction | MAE={mae:.2f}, RMSE={rmse:.2f}")
+    plt.title(f"Backtest | MAE={mae:.2f}, RMSE={rmse:.2f}")
     plt.xticks(rotation=45)
     plt.legend()
     plt.grid(True)
@@ -186,7 +185,6 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     )
     plt.close()
 
-
 # ================= Main =================
 if __name__ == "__main__":
     TICKER = "2301.TW"
@@ -197,16 +195,9 @@ if __name__ == "__main__":
     df = ensure_today_row(df)
 
     FEATURES = [
-        "Close",
-        "Volume",
-        "RSI",
-        "MACD",
-        "K",
-        "D",
-        "ATR_14"
+        "Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14"
     ]
 
-    # SMA 只為畫圖
     df["SMA5"] = df["Close"].rolling(5).mean()
     df["SMA10"] = df["Close"].rolling(10).mean()
     df = df.dropna()
@@ -227,7 +218,11 @@ if __name__ == "__main__":
     X_tr_s = scale_X(X_tr)
     X_te_s = scale_X(X_te)
 
-    model = build_lstm((LOOKBACK, len(FEATURES)), STEPS)
+    model = build_attention_lstm(
+        (LOOKBACK, len(FEATURES)),
+        STEPS
+    )
+
     model.fit(
         X_tr_s, y_tr,
         epochs=50,
@@ -236,7 +231,6 @@ if __name__ == "__main__":
         callbacks=[EarlyStopping(patience=6, restore_best_weights=True)]
     )
 
-    # ===== 預測未來 =====
     raw_returns = model.predict(X_te_s)[-1]
 
     today = pd.Timestamp(datetime.now().date())
