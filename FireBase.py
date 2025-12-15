@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-FireBase_Attention_LSTM.py
-- Firestore 讀 OHLCV + 已算好技術指標
-- 不重算指標
-- 預測 multi-step log return
-- Attention-LSTM（主流升級版）
+FireBase_Attention_LSTM_Direction.py
+- Attention-LSTM
+- Multi-task: Return + Direction
+- 圖表輸出完全不變
 """
 
 import os, json
@@ -66,7 +65,7 @@ def ensure_today_row(df):
 
 # ================= Sequence =================
 def create_sequences(df, features, steps=10, window=60):
-    X, y = [], []
+    X, y_ret, y_dir = [], [], []
 
     logret = np.log(df["Close"]).diff()
     df = df.iloc[1:]
@@ -74,28 +73,40 @@ def create_sequences(df, features, steps=10, window=60):
     data = df[features].values
 
     for i in range(window, len(df) - steps):
+        future_ret = logret.iloc[i:i + steps].values
         X.append(data[i - window:i])
-        y.append(logret.iloc[i:i + steps].values)
+        y_ret.append(future_ret)
+        y_dir.append(1.0 if future_ret.sum() > 0 else 0.0)
 
-    return np.array(X), np.array(y)
+    return np.array(X), np.array(y_ret), np.array(y_dir)
 
-# ================= Attention-LSTM =================
+# ================= Attention-LSTM + Direction =================
 def build_attention_lstm(input_shape, steps):
     inp = Input(shape=input_shape)
 
     x = LSTM(64, return_sequences=True)(inp)
     x = Dropout(0.1)(x)
 
-    # Self-Attention
     attn = Attention()([x, x])
     context = GlobalAveragePooling1D()(attn)
 
-    out = Dense(steps)(context)
+    # Head 1: return
+    out_ret = Dense(steps, name="return")(context)
 
-    model = Model(inp, out)
+    # Head 2: direction
+    out_dir = Dense(1, activation="sigmoid", name="direction")(context)
+
+    model = Model(inp, [out_ret, out_dir])
     model.compile(
         optimizer="adam",
-        loss="huber"
+        loss={
+            "return": "huber",
+            "direction": "binary_crossentropy"
+        },
+        loss_weights={
+            "return": 1.0,
+            "direction": 0.4
+        }
     )
     return model
 
@@ -153,7 +164,9 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     X_last = X_te_s[-1:]
     y_true = y_te[-1]
 
-    pred_ret = model.predict(X_last)[0]
+    pred_ret, _ = model.predict(X_last)
+    pred_ret = pred_ret[0]
+
     dates = df.index[-steps:]
     start_price = df.loc[dates[0] - BDay(1), "Close"]
 
@@ -202,11 +215,12 @@ if __name__ == "__main__":
     df["SMA10"] = df["Close"].rolling(10).mean()
     df = df.dropna()
 
-    X, y = create_sequences(df, FEATURES, STEPS, LOOKBACK)
+    X, y_ret, y_dir = create_sequences(df, FEATURES, STEPS, LOOKBACK)
     split = int(len(X) * 0.85)
 
     X_tr, X_te = X[:split], X[split:]
-    y_tr, y_te = y[:split], y[split:]
+    y_ret_tr, y_ret_te = y_ret[:split], y_ret[split:]
+    y_dir_tr, y_dir_te = y_dir[:split], y_dir[split:]
 
     sx = MinMaxScaler()
     sx.fit(df[FEATURES].iloc[:split + LOOKBACK])
@@ -224,14 +238,18 @@ if __name__ == "__main__":
     )
 
     model.fit(
-        X_tr_s, y_tr,
+        X_tr_s,
+        {"return": y_ret_tr, "direction": y_dir_tr},
         epochs=50,
         batch_size=32,
         verbose=2,
         callbacks=[EarlyStopping(patience=6, restore_best_weights=True)]
     )
 
-    raw_returns = model.predict(X_te_s)[-1]
+    pred_ret, pred_dir = model.predict(X_te_s)
+    raw_returns = pred_ret[-1]
+
+    print(f"📈 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
 
     today = pd.Timestamp(datetime.now().date())
     last_trade_date = df.index[df.index < today][-1]
@@ -261,4 +279,4 @@ if __name__ == "__main__":
     )
 
     plot_and_save(df, future_df)
-    plot_backtest_error(df, X_te_s, y_te, model, STEPS)
+    plot_backtest_error(df, X_te_s, y_ret_te, model, STEPS)
