@@ -1,13 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 FireBase_LSTM_v2.py
-- Firestore 讀 OHLCV + 已算好技術指標
-- 不重算指標（避免分佈錯亂）
-- 預測 log return（多步）
-- 價格由 return 還原
-- 原預測圖不動
-- 新增：預測回測誤差圖（Pred vs Actual）
-- 訓練穩定化修正版（ONLY 動訓練）
+KERAS 3 SAFE – sample_weight + 完整畫圖
 """
 
 import os, json
@@ -23,14 +17,12 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 
-# Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ================= Firebase 初始化 =================
 key_dict = json.loads(os.environ.get("FIREBASE", "{}"))
 db = None
-
 if key_dict:
     cred = credentials.Certificate(key_dict)
     try:
@@ -42,63 +34,38 @@ if key_dict:
 # ================= Firestore 讀取 =================
 def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=400):
     rows = []
-    if db:
-        for doc in db.collection(collection).stream():
-            p = doc.to_dict().get(ticker)
-            if p:
-                rows.append({"date": doc.id, **p})
+    for doc in db.collection(collection).stream():
+        p = doc.to_dict().get(ticker)
+        if p:
+            rows.append({"date": doc.id, **p})
 
     df = pd.DataFrame(rows)
     if df.empty:
         raise ValueError("⚠️ Firestore 無資料")
 
     df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").tail(days).set_index("date")
-    return df
+    return df.sort_values("date").tail(days).set_index("date")
 
-# ================= 假日補今天 =================
 def ensure_today_row(df):
     today = pd.Timestamp(datetime.now().date())
-    last_date = df.index.max()
-    if last_date < today:
-        df.loc[today] = df.loc[last_date]
-        print(f"⚠️ 今日無資料，使用 {last_date.date()} 補今日")
+    if df.index.max() < today:
+        df.loc[today] = df.iloc[-1]
+        print(f"⚠️ 今日無資料，用 {df.index[-2].date()} 補")
     return df.sort_index()
 
-# ================= Sequence（預測 log return） =================
-def create_sequences(df, features, steps=10, window=60):
+# ================= Sequence =================
+def create_sequences(df, features, steps, window):
     X, y = [], []
-
     data = df[features].values
-
-    # ★ 修正 1：log return clip（防極端值）
     logret = np.log(df["Close"] / df["Close"].shift()).clip(-0.1, 0.1)
 
     for i in range(window, len(df) - steps):
-        X.append(data[i - window:i])
-        y.append(logret.iloc[i:i + steps].values)
+        X.append(data[i-window:i])
+        y.append(logret.iloc[i:i+steps].values)
 
     return np.array(X), np.array(y)
 
-# ================= Weighted Loss =================
-def weighted_huber_loss(steps):
-    weights = tf.reshape(
-        tf.linspace(1.0, 0.3, steps),
-        (1, steps)
-    )
-
-    huber = tf.keras.losses.Huber(
-        reduction=tf.keras.losses.Reduction.NONE
-    )
-
-    def loss(y_true, y_pred):
-        # (batch, steps)
-        err = huber(y_true, y_pred)
-        return tf.reduce_mean(err * weights)
-
-    return loss
-
-# ================= LSTM（雙層） =================
+# ================= LSTM =================
 def build_lstm(input_shape, steps):
     m = Sequential([
         LSTM(64, return_sequences=True, input_shape=input_shape),
@@ -109,18 +76,18 @@ def build_lstm(input_shape, steps):
     ])
     m.compile(
         optimizer="adam",
-        loss=weighted_huber_loss(steps)
+        loss=tf.keras.losses.Huber()
     )
     return m
 
-# ================= 原預測圖（完全不動） =================
+# ================= 原預測圖 =================
 def plot_and_save(df_hist, future_df):
     hist = df_hist.tail(10)
 
     hist_dates = hist.index.strftime("%Y-%m-%d").tolist()
     future_dates = future_df["date"].dt.strftime("%Y-%m-%d").tolist()
-
     all_dates = hist_dates + future_dates
+
     x_hist = np.arange(len(hist_dates))
     x_future = np.arange(len(hist_dates), len(all_dates))
 
@@ -137,10 +104,6 @@ def plot_and_save(df_hist, future_df):
         "r:o", label="Pred Close"
     )
 
-    for i, price in enumerate(future_df["Pred_Close"]):
-        ax.text(x_future[i], price + 0.3, f"{price:.2f}",
-                color="red", fontsize=9, ha="center")
-
     ax.plot(
         np.concatenate([[x_hist[-1]], x_future]),
         [hist["SMA5"].iloc[-1]] + future_df["Pred_MA5"].tolist(),
@@ -154,33 +117,32 @@ def plot_and_save(df_hist, future_df):
     )
 
     ax.set_xticks(np.arange(len(all_dates)))
-    ax.set_xticklabels(all_dates, rotation=45, ha="right")
-
+    ax.set_xticklabels(all_dates, rotation=45)
     ax.legend()
-    ax.set_title("2301.TW LSTM 預測（Return-based 穩定版）")
+    ax.set_title("2301.TW LSTM 預測（KERAS3 SAFE）")
 
     os.makedirs("results", exist_ok=True)
     plt.savefig(f"results/{datetime.now():%Y-%m-%d}_pred.png",
                 dpi=300, bbox_inches="tight")
     plt.close()
 
-# ================= 回測誤差圖（不動） =================
+# ================= 回測誤差圖 =================
 def plot_backtest_error(df, X_te_s, y_te, model, steps):
     X_last = X_te_s[-1:]
     y_true = y_te[-1]
 
-    pred_ret = model.predict(X_last)[0]
+    pred_ret = model.predict(X_last, verbose=0)[0]
     dates = df.index[-steps:]
     start_price = df.loc[dates[0] - BDay(1), "Close"]
 
     true_prices, pred_prices = [], []
-    p_true = p_pred = start_price
+    p_t = p_p = start_price
 
-    for r_t, r_p in zip(y_true, pred_ret):
-        p_true *= np.exp(r_t)
-        p_pred *= np.exp(r_p)
-        true_prices.append(p_true)
-        pred_prices.append(p_pred)
+    for rt, rp in zip(y_true, pred_ret):
+        p_t *= np.exp(rt)
+        p_p *= np.exp(rp)
+        true_prices.append(p_t)
+        pred_prices.append(p_p)
 
     mae = np.mean(np.abs(np.array(true_prices) - np.array(pred_prices)))
     rmse = np.sqrt(np.mean((np.array(true_prices) - np.array(pred_prices)) ** 2))
@@ -188,17 +150,14 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     plt.figure(figsize=(12,6))
     plt.plot(dates, true_prices, label="Actual Close")
     plt.plot(dates, pred_prices, "--o", label="Pred Close")
-    plt.title(f"Backtest Prediction | MAE={mae:.2f}, RMSE={rmse:.2f}")
-    plt.xticks(rotation=45)
+    plt.title(f"Backtest | MAE={mae:.2f}, RMSE={rmse:.2f}")
     plt.legend()
     plt.grid(True)
+    plt.xticks(rotation=45)
 
     os.makedirs("results", exist_ok=True)
-    plt.savefig(
-        f"results/{datetime.now():%Y-%m-%d}_backtest.png",
-        dpi=300,
-        bbox_inches="tight"
-    )
+    plt.savefig(f"results/{datetime.now():%Y-%m-%d}_backtest.png",
+                dpi=300, bbox_inches="tight")
     plt.close()
 
 # ================= Main =================
@@ -207,23 +166,12 @@ if __name__ == "__main__":
     LOOKBACK = 60
     STEPS = 10
 
+    FEATURES = ["Close","Volume","RSI","MACD","K","D","ATR_14"]
+
     df = load_df_from_firestore(TICKER)
     df = ensure_today_row(df)
 
-    FEATURES = [
-        "Close",
-        "Volume",
-        "RSI",
-        "MACD",
-        "K",
-        "D",
-        "ATR_14"
-    ]
-
-    # ★ 修正 2：Volume log1p（不影響指標）
     df["Volume"] = np.log1p(df["Volume"])
-
-    # SMA 只為畫圖
     df["SMA5"] = df["Close"].rolling(5).mean()
     df["SMA10"] = df["Close"].rolling(10).mean()
     df = df.dropna()
@@ -234,40 +182,42 @@ if __name__ == "__main__":
     X_tr, X_te = X[:split], X[split:]
     y_tr, y_te = y[:split], y[split:]
 
-    sx = MinMaxScaler()
-    sx.fit(df[FEATURES].iloc[:split + LOOKBACK])
+    scaler = MinMaxScaler()
+    scaler.fit(df[FEATURES].iloc[:split + LOOKBACK])
 
     def scale_X(X):
         n, t, f = X.shape
-        return sx.transform(X.reshape(-1, f)).reshape(n, t, f)
+        return scaler.transform(X.reshape(-1, f)).reshape(n, t, f)
 
     X_tr_s = scale_X(X_tr)
     X_te_s = scale_X(X_te)
 
+    step_weights = np.linspace(1.0, 0.3, STEPS)
+    sw_tr = np.tile(step_weights, (len(y_tr), 1))
+
     model = build_lstm((LOOKBACK, len(FEATURES)), STEPS)
     model.fit(
         X_tr_s, y_tr,
+        sample_weight=sw_tr,
         epochs=60,
         batch_size=16,
         verbose=2,
         callbacks=[EarlyStopping(patience=8, restore_best_weights=True)]
     )
 
-    # ===== 預測未來 =====
-    raw_returns = model.predict(X_te_s)[-1]
+    # ===== 未來預測 =====
+    raw_returns = model.predict(X_te_s, verbose=0)[-1]
 
-    today = pd.Timestamp(datetime.now().date())
-    last_trade_date = df.index[df.index < today][-1]
+    last_trade_date = df.index[-1]
     last_close = df.loc[last_trade_date, "Close"]
 
-    prices, price = [], last_close
+    prices, p = [], last_close
     for r in raw_returns:
-        price *= np.exp(r)
-        prices.append(price)
+        p *= np.exp(r)
+        prices.append(p)
 
-    seq = df.loc[:last_trade_date, "Close"].iloc[-10:].tolist()
+    seq = df["Close"].iloc[-10:].tolist()
     future = []
-
     for p in prices:
         seq.append(p)
         future.append({
