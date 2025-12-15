@@ -7,6 +7,7 @@ FireBase_LSTM_v2.py
 - 價格由 return 還原
 - 原預測圖不動
 - 新增：預測回測誤差圖（Pred vs Actual）
+- 訓練穩定化修正版（ONLY 動訓練）
 """
 
 import os, json
@@ -17,6 +18,7 @@ import matplotlib.pyplot as plt
 from pandas.tseries.offsets import BDay
 
 from sklearn.preprocessing import MinMaxScaler
+import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
@@ -68,7 +70,9 @@ def create_sequences(df, features, steps=10, window=60):
     X, y = [], []
 
     data = df[features].values
-    logret = np.log(df["Close"] / df["Close"].shift())
+
+    # ★ 修正 1：log return clip（防極端值）
+    logret = np.log(df["Close"] / df["Close"].shift()).clip(-0.1, 0.1)
 
     for i in range(window, len(df) - steps):
         X.append(data[i - window:i])
@@ -76,14 +80,29 @@ def create_sequences(df, features, steps=10, window=60):
 
     return np.array(X), np.array(y)
 
-# ================= LSTM =================
+# ================= Weighted Loss =================
+def weighted_huber_loss(steps):
+    weights = tf.linspace(1.0, 0.3, steps)
+
+    def loss(y_true, y_pred):
+        err = tf.keras.losses.huber(y_true, y_pred)
+        return tf.reduce_mean(err * weights)
+
+    return loss
+
+# ================= LSTM（雙層） =================
 def build_lstm(input_shape, steps):
     m = Sequential([
-        LSTM(64, input_shape=input_shape),
+        LSTM(64, return_sequences=True, input_shape=input_shape),
+        Dropout(0.1),
+        LSTM(32),
         Dropout(0.1),
         Dense(steps)
     ])
-    m.compile(optimizer="adam", loss="huber")
+    m.compile(
+        optimizer="adam",
+        loss=weighted_huber_loss(steps)
+    )
     return m
 
 # ================= 原預測圖（完全不動） =================
@@ -137,27 +156,17 @@ def plot_and_save(df_hist, future_df):
                 dpi=300, bbox_inches="tight")
     plt.close()
 
-# ================= 新增：回測誤差圖 =================
+# ================= 回測誤差圖（不動） =================
 def plot_backtest_error(df, X_te_s, y_te, model, steps):
-    """
-    使用測試集最後一筆，畫 Pred vs Actual（x 軸 = 交易日）
-    """
     X_last = X_te_s[-1:]
     y_true = y_te[-1]
 
     pred_ret = model.predict(X_last)[0]
-
-    # 對應的實際交易日（最後 steps 天）
     dates = df.index[-steps:]
-
-    # 對應起始價格（回測起點前一天）
     start_price = df.loc[dates[0] - BDay(1), "Close"]
 
-    true_prices = []
-    pred_prices = []
-
-    p_true = start_price
-    p_pred = start_price
+    true_prices, pred_prices = [], []
+    p_true = p_pred = start_price
 
     for r_t, r_p in zip(y_true, pred_ret):
         p_true *= np.exp(r_t)
@@ -184,7 +193,6 @@ def plot_backtest_error(df, X_te_s, y_te, model, steps):
     )
     plt.close()
 
-
 # ================= Main =================
 if __name__ == "__main__":
     TICKER = "2301.TW"
@@ -203,6 +211,9 @@ if __name__ == "__main__":
         "D",
         "ATR_14"
     ]
+
+    # ★ 修正 2：Volume log1p（不影響指標）
+    df["Volume"] = np.log1p(df["Volume"])
 
     # SMA 只為畫圖
     df["SMA5"] = df["Close"].rolling(5).mean()
@@ -228,10 +239,10 @@ if __name__ == "__main__":
     model = build_lstm((LOOKBACK, len(FEATURES)), STEPS)
     model.fit(
         X_tr_s, y_tr,
-        epochs=50,
-        batch_size=32,
+        epochs=60,
+        batch_size=16,
         verbose=2,
-        callbacks=[EarlyStopping(patience=6, restore_best_weights=True)]
+        callbacks=[EarlyStopping(patience=8, restore_best_weights=True)]
     )
 
     # ===== 預測未來 =====
@@ -241,8 +252,7 @@ if __name__ == "__main__":
     last_trade_date = df.index[df.index < today][-1]
     last_close = df.loc[last_trade_date, "Close"]
 
-    prices = []
-    price = last_close
+    prices, price = [], last_close
     for r in raw_returns:
         price *= np.exp(r)
         prices.append(price)
