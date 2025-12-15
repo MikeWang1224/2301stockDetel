@@ -3,7 +3,7 @@
 FireBase_Attention_LSTM_Direction.py
 - Attention-LSTM
 - Multi-task: Return + Direction
-- 圖表輸出完全不變
+- 圖表輸出完全不變（新增一個 Today 標記）
 """
 
 import os, json
@@ -81,27 +81,19 @@ def create_sequences(df, features, steps=10, window=60):
 
     return np.array(X), np.array(y_ret), np.array(y_dir)
 
-# ================= Attention Pooling（改A：可學習的時間步加權和） =================
+# ================= Attention Pooling（可學習的時間步加權和） =================
 def build_attention_lstm(input_shape, steps):
     inp = Input(shape=input_shape)
 
     x = LSTM(64, return_sequences=True)(inp)
     x = Dropout(0.1)(x)
 
-    # ---- 改A重點：Learnable Attention Pooling ----
-    # score: (batch, time, 1)
-    score = Dense(1, name="attn_score")(x)
-    # weights: (batch, time, 1)  (softmax over time axis)
-    weights = Softmax(axis=1, name="attn_weights")(score)
-    # context: (batch, hidden)
+    score = Dense(1, name="attn_score")(x)                 # (batch, time, 1)
+    weights = Softmax(axis=1, name="attn_weights")(score)  # softmax over time
     context = Lambda(lambda t: tf.reduce_sum(t[0] * t[1], axis=1),
-                     name="attn_context")([x, weights])
-    # --------------------------------------------
+                     name="attn_context")([x, weights])    # (batch, hidden)
 
-    # Head 1: return
     out_ret = Dense(steps, name="return")(context)
-
-    # Head 2: direction
     out_dir = Dense(1, activation="sigmoid", name="direction")(context)
 
     model = Model(inp, [out_ret, out_dir])
@@ -118,7 +110,7 @@ def build_attention_lstm(input_shape, steps):
     )
     return model
 
-# ================= 原預測圖（不動） =================
+# ================= 原預測圖（幾乎不動：新增 Today 標記） =================
 def plot_and_save(df_hist, future_df):
     hist = df_hist.tail(10)
     hist_dates = hist.index.strftime("%Y-%m-%d").tolist()
@@ -134,6 +126,13 @@ def plot_and_save(df_hist, future_df):
     ax.plot(x_hist, hist["Close"], label="Close")
     ax.plot(x_hist, hist["SMA5"], label="SMA5")
     ax.plot(x_hist, hist["SMA10"], label="SMA10")
+
+    # ✅ 新增：Today 點與文字（hist 最後一個點）
+    today_x = x_hist[-1]
+    today_y = float(hist["Close"].iloc[-1])
+    ax.scatter([today_x], [today_y], marker="*", s=160, label="Today Close")
+    ax.text(today_x, today_y + 0.3, f"Today {today_y:.2f}",
+            fontsize=10, ha="center")
 
     ax.plot(
         np.concatenate([[x_hist[-1]], x_future]),
@@ -256,13 +255,13 @@ if __name__ == "__main__":
 
     pred_ret, pred_dir = model.predict(X_te_s, verbose=0)
     raw_returns = pred_ret[-1]
-    raw_returns = np.clip(raw_returns, -0.03, 0.03) 
+    raw_returns = np.clip(raw_returns, -0.03, 0.03)
 
     print(f"📈 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
 
-    today = pd.Timestamp(datetime.now().date())
-    last_trade_date = df.index[df.index < today][-1]
-    last_close = df.loc[last_trade_date, "Close"]
+    # ✅ 改：用 df 最後一天作為「今天/最新基準日」（包含 today）
+    asof_date = df.index.max()
+    last_close = df.loc[asof_date, "Close"]
 
     prices = []
     price = last_close
@@ -270,7 +269,7 @@ if __name__ == "__main__":
         price *= np.exp(r)
         prices.append(price)
 
-    seq = df.loc[:last_trade_date, "Close"].iloc[-10:].tolist()
+    seq = df.loc[:asof_date, "Close"].iloc[-10:].tolist()
     future = []
 
     for p in prices:
