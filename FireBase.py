@@ -4,6 +4,7 @@ FireBase_Attention_LSTM_Direction.py
 - Attention-LSTM
 - Multi-task: Return + Direction
 - 圖表輸出完全不變（新增一個 Today 標記）
+- ✅ 改動：FEATURES 加入 Open / High / Low（最低成本版）
 """
 
 import os, json
@@ -214,8 +215,10 @@ if __name__ == "__main__":
     df = load_df_from_firestore(TICKER)
     df = ensure_today_row(df)
 
+    # ✅ 改動：加入 Open/High/Low（最低成本版）
     FEATURES = [
-        "Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14"
+        "Open", "High", "Low", "Close",
+        "Volume", "RSI", "MACD", "K", "D", "ATR_14"
     ]
 
     df["SMA5"] = df["Close"].rolling(5).mean()
