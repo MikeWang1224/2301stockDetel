@@ -109,29 +109,59 @@ def build_attention_lstm(input_shape, steps, max_daily_logret=0.06):
 # ================= 預測圖（不變） =================
 def plot_and_save(df_hist, future_df):
     hist = df_hist.tail(10)
-    x_hist = np.arange(len(hist))
-    x_future = np.arange(len(hist), len(hist) + len(future_df))
+    hist_dates = hist.index.strftime("%Y-%m-%d").tolist()
+    future_dates = future_df["date"].dt.strftime("%Y-%m-%d").tolist()
+
+    all_dates = hist_dates + future_dates
+    x_hist = np.arange(len(hist_dates))
+    x_future = np.arange(len(hist_dates), len(all_dates))
 
     plt.figure(figsize=(18,8))
-    plt.plot(x_hist, hist["Close"], label="Close")
-    plt.plot(x_hist, hist["SMA5"], label="SMA5")
-    plt.plot(x_hist, hist["SMA10"], label="SMA10")
+    ax = plt.gca()
 
+    ax.plot(x_hist, hist["Close"], label="Close")
+    ax.plot(x_hist, hist["SMA5"], label="SMA5")
+    ax.plot(x_hist, hist["SMA10"], label="SMA10")
+
+    # ✅ Today 點與文字（hist 最後一個點）
     today_x = x_hist[-1]
-    today_y = hist["Close"].iloc[-1]
-    plt.scatter(today_x, today_y, s=120, marker="*", label="Today")
+    today_y = float(hist["Close"].iloc[-1])
+    ax.scatter([today_x], [today_y], marker="*", s=160, label="Today Close")
+    ax.text(today_x, today_y + 0.3, f"Today {today_y:.2f}",
+            fontsize=10, ha="center")
 
-    plt.plot(
-        np.concatenate([[today_x], x_future]),
-        [today_y] + future_df["Pred_Close"].tolist(),
+    ax.plot(
+        np.concatenate([[x_hist[-1]], x_future]),
+        [hist["Close"].iloc[-1]] + future_df["Pred_Close"].tolist(),
         "r:o", label="Pred Close"
     )
 
-    plt.legend()
-    plt.grid(True)
+    for i, price in enumerate(future_df["Pred_Close"]):
+        ax.text(x_future[i], price + 0.3, f"{price:.2f}",
+                color="red", fontsize=9, ha="center")
+
+    ax.plot(
+        np.concatenate([[x_hist[-1]], x_future]),
+        [hist["SMA5"].iloc[-1]] + future_df["Pred_MA5"].tolist(),
+        "g--o", label="Pred MA5"
+    )
+
+    ax.plot(
+        np.concatenate([[x_hist[-1]], x_future]),
+        [hist["SMA10"].iloc[-1]] + future_df["Pred_MA10"].tolist(),
+        "b--o", label="Pred MA10"
+    )
+
+    ax.set_xticks(np.arange(len(all_dates)))
+    ax.set_xticklabels(all_dates, rotation=45, ha="right")
+    ax.legend()
+    ax.set_title("2301.TW Attention-LSTM 預測")
+
     os.makedirs("results", exist_ok=True)
-    plt.savefig(f"results/{datetime.now():%Y-%m-%d}_pred.png", dpi=300)
+    plt.savefig(f"results/{datetime.now():%Y-%m-%d}_pred.png",
+                dpi=300, bbox_inches="tight")
     plt.close()
+
 
 # ================= 回測圖：昨日預測 vs 今日實際（折線） =================
 # ================= 回測圖（昨日 forecast.csv + 今日實際） =================
