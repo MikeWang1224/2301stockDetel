@@ -3,8 +3,22 @@
 FireBase_Attention_LSTM_Direction.py
 - Attention-LSTM
 - Multi-task: Return path + Direction
-- 小資料友善、無 leakage
-- 回測圖：昨日預測 vs 今日實際（折線）
+- ✅ 小資料友善版：更穩、更不容易亂噴
+  1) LOOKBACK=40, STEPS=5
+  2) LSTM + Attention pooling（參數比 Transformer 更適合小資料）
+  3) ✅ Return head 加 tanh 限幅（避免預測爆炸）
+  4) ✅ Volume 做 log1p（小資料更穩）
+- 圖表輸出完全不變（保留 Today 標記）
+
+✅ 改1：修正 scaler fit / split 座標系，避免資料洩漏（leakage）
+  - create_sequences 回傳每個樣本對應的日期 idx
+  - split 用樣本數切，scaler.fit 只用 train 區間的 df 特徵
+
+✅ 新增：同時輸出 PNG + CSV
+  - results/YYYY-MM-DD_pred.png
+  - results/YYYY-MM-DD_forecast.csv
+  - results/YYYY-MM-DD_backtest.png
+  - results/YYYY-MM-DD_backtest.csv
 """
 
 import os, json
@@ -17,9 +31,13 @@ from pandas.tseries.offsets import BDay
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Softmax, Lambda
+from tensorflow.keras.layers import (
+    Input, LSTM, Dense, Dropout,
+    Softmax, Lambda
+)
 from tensorflow.keras.callbacks import EarlyStopping
 
+# Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -38,75 +56,107 @@ if key_dict:
 # ================= Firestore 讀取 =================
 def load_df_from_firestore(ticker, collection="NEW_stock_data_liteon", days=500):
     rows = []
-    for doc in db.collection(collection).stream():
-        p = doc.to_dict().get(ticker)
-        if p:
-            rows.append({"date": doc.id, **p})
+    if db:
+        for doc in db.collection(collection).stream():
+            p = doc.to_dict().get(ticker)
+            if p:
+                rows.append({"date": doc.id, **p})
 
     df = pd.DataFrame(rows)
     if df.empty:
         raise ValueError("⚠️ Firestore 無資料")
 
     df["date"] = pd.to_datetime(df["date"])
-    return df.sort_values("date").tail(days).set_index("date")
+    df = df.sort_values("date").tail(days).set_index("date")
+    return df
 
 # ================= 假日補今天 =================
 def ensure_today_row(df):
     today = pd.Timestamp(datetime.now().date())
-    if df.index.max() < today:
-        df.loc[today] = df.iloc[-1]
+    last_date = df.index.max()
+    if last_date < today:
+        df.loc[today] = df.loc[last_date]
+        print(f"⚠️ 今日無資料，使用 {last_date.date()} 補今日")
     return df.sort_index()
 
-# ================= Feature =================
-def add_features(df):
-    df["Volume"] = np.log1p(df["Volume"].astype(float))
+# ================= Feature Engineering =================
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    # ✅ Volume 尺度穩定（非常建議）
+    if "Volume" in df.columns:
+        df["Volume"] = np.log1p(df["Volume"].astype(float))
+
+    # 圖表用均線（保持不變）
     df["SMA5"] = df["Close"].rolling(5).mean()
     df["SMA10"] = df["Close"].rolling(10).mean()
     return df
 
-# ================= Sequence =================
+# ================= Sequence（避免錯位，且不亂切 df） =================
 def create_sequences(df, features, steps=5, window=40):
+    """
+    X: t-window ~ t-1
+    y_ret: t ~ t+steps-1 的 log return
+    y_dir: 未來 steps 天累積方向
+    idx: 每個樣本對應的「t 當天日期」（用來避免 scaler/split 座標系錯位）
+    """
     X, y_ret, y_dir, idx = [], [], [], []
+
     close = df["Close"].astype(float)
     logret = np.log(close).diff()
     feat = df[features].values
 
     for i in range(window, len(df) - steps):
-        x = feat[i - window:i]
-        r = logret.iloc[i:i + steps].values
-        if np.any(np.isnan(x)) or np.any(np.isnan(r)):
+        x_seq = feat[i - window:i]
+        future_ret = logret.iloc[i:i + steps].values
+        if np.any(np.isnan(future_ret)) or np.any(np.isnan(x_seq)):
             continue
-        X.append(x)
-        y_ret.append(r)
-        y_dir.append(float(r.sum() > 0))
-        idx.append(df.index[i])
+        X.append(x_seq)
+        y_ret.append(future_ret)
+        y_dir.append(1.0 if future_ret.sum() > 0 else 0.0)
+        idx.append(df.index[i])  # ✅ 這個樣本對應的 t 日期
 
     return np.array(X), np.array(y_ret), np.array(y_dir), np.array(idx)
 
-# ================= Model =================
+# ================= Attention-LSTM（✅ return 限幅） =================
 def build_attention_lstm(input_shape, steps, max_daily_logret=0.06):
+    """
+    max_daily_logret：限制單日 log-return 最大幅度，避免連乘價格爆炸
+    常見範圍：0.04~0.08
+    """
     inp = Input(shape=input_shape)
+
     x = LSTM(64, return_sequences=True)(inp)
     x = Dropout(0.2)(x)
 
-    score = Dense(1)(x)
-    weights = Softmax(axis=1)(score)
-    context = Lambda(lambda t: tf.reduce_sum(t[0] * t[1], axis=1))([x, weights])
+    score = Dense(1, name="attn_score")(x)                 # (batch, time, 1)
+    weights = Softmax(axis=1, name="attn_weights")(score)  # softmax over time
+    context = Lambda(lambda t: tf.reduce_sum(t[0] * t[1], axis=1),
+                     name="attn_context")([x, weights])    # (batch, hidden)
 
-    raw = Dense(steps, activation="tanh")(context)
+    # ✅ return head：tanh 限幅（結構性保證不會爆）
+    raw = Dense(steps, activation="tanh")(context)          # [-1, 1]
     out_ret = Lambda(lambda t: t * max_daily_logret, name="return")(raw)
+
     out_dir = Dense(1, activation="sigmoid", name="direction")(context)
 
     model = Model(inp, [out_ret, out_dir])
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(7e-4),
-        loss={"return": tf.keras.losses.Huber(), "direction": "binary_crossentropy"},
-        loss_weights={"return": 1.0, "direction": 0.4},
-        metrics={"direction": ["accuracy"]}
+        optimizer=tf.keras.optimizers.Adam(learning_rate=7e-4),
+        loss={
+            "return": tf.keras.losses.Huber(),
+            "direction": "binary_crossentropy"
+        },
+        loss_weights={
+            "return": 1.0,
+            "direction": 0.4
+        },
+        metrics={
+            "direction": [tf.keras.metrics.BinaryAccuracy(name="acc"),
+                          tf.keras.metrics.AUC(name="auc")]
+        }
     )
     return model
 
-# ================= 預測圖（不變） =================
+# ================= 原預測圖（完全不動：新增 Today 標記） =================
 def plot_and_save(df_hist, future_df):
     hist = df_hist.tail(10)
     hist_dates = hist.index.strftime("%Y-%m-%d").tolist()
@@ -162,76 +212,58 @@ def plot_and_save(df_hist, future_df):
                 dpi=300, bbox_inches="tight")
     plt.close()
 
+# ================= 回測誤差圖（PNG + CSV） =================
+def plot_backtest_error(df, X_te_s, y_te, model, steps):
+    X_last = X_te_s[-1:]
+    y_true = y_te[-1]
 
-# ================= 回測圖：昨日預測 vs 今日實際（折線） =================
-# ================= 回測圖（昨日 forecast.csv + 今日實際） =================
-# ================= 回測圖（自動找最近 forecast.csv） =================
-def plot_backtest_from_forecast_csv(df):
-    """
-    回測圖：
-    - 自動尋找 results/ 內「最新一份、不是今天」的 forecast.csv
-    - 畫出 CSV 內全部 Pred_Close
-    - 最後接上今天實際 Close
-    """
+    pred_ret, _ = model.predict(X_last, verbose=0)
+    pred_ret = pred_ret[0]
 
-    today = df.index[-1]
-    today_close = float(df["Close"].iloc[-1])
-    today_str = f"{today:%Y-%m-%d}"
+    dates = df.index[-steps:]
+    start_price = df.loc[dates[0] - BDay(1), "Close"]
 
-    files = sorted(
-        f for f in os.listdir("results")
-        if f.endswith("_forecast.csv") and not f.startswith(today_str)
-    )
+    true_prices, pred_prices = [], []
+    p_true = p_pred = start_price
 
-    if not files:
-        print("⚠️ 找不到任何可用的 forecast.csv（排除今天）")
-        return
+    for r_t, r_p in zip(y_true, pred_ret):
+        p_true *= np.exp(r_t)
+        p_pred *= np.exp(r_p)
+        true_prices.append(p_true)
+        pred_prices.append(p_pred)
 
-    latest_fc = files[-1]  # 最新的一份
-    fc_path = os.path.join("results", latest_fc)
+    true_prices = np.array(true_prices, dtype=float)
+    pred_prices = np.array(pred_prices, dtype=float)
 
-    fc = pd.read_csv(fc_path)
-    if fc.empty or "Pred_Close" not in fc.columns:
-        print(f"⚠️ forecast.csv 格式異常：{latest_fc}")
-        return
+    mae = np.mean(np.abs(true_prices - pred_prices))
+    rmse = np.sqrt(np.mean((true_prices - pred_prices) ** 2))
 
-    pred_dates = pd.to_datetime(fc["date"])
-    pred_prices = fc["Pred_Close"].astype(float).values
-
-    all_dates = list(pred_dates) + [today]
-    all_prices = list(pred_prices) + [today_close]
-
-    # === 折線圖 ===
-    plt.figure(figsize=(12,6))
-    plt.plot(
-        all_dates,
-        all_prices,
-        "o-",
-        linewidth=2,
-        label="Forecast Path → Today Actual"
-    )
-
-    plt.scatter(today, today_close, s=160, marker="*", label="Today Close")
-    plt.text(
-        today,
-        today_close + 0.3,
-        f"Actual {today_close:.2f}",
-        ha="center"
-    )
-
-    plt.title(f"Backtest | {latest_fc.replace('_forecast.csv','')}")
-    plt.xticks(rotation=45)
-    plt.grid(True)
-    plt.legend()
-
+    # ✅ 回測數值輸出 CSV
+    bt_df = pd.DataFrame({
+        "date": pd.to_datetime(dates),
+        "Actual_Close": true_prices,
+        "Pred_Close": pred_prices,
+        "AbsError": np.abs(true_prices - pred_prices),
+    })
     os.makedirs("results", exist_ok=True)
+    bt_df.to_csv(f"results/{datetime.now():%Y-%m-%d}_backtest.csv",
+                 index=False, encoding="utf-8-sig")
+
+    # 回測圖 PNG（保持原風格）
+    plt.figure(figsize=(12,6))
+    plt.plot(dates, true_prices, label="Actual Close")
+    plt.plot(dates, pred_prices, "--o", label="Pred Close")
+    plt.title(f"Backtest | MAE={mae:.2f}, RMSE={rmse:.2f}")
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.grid(True)
+
     plt.savefig(
-        f"results/{today:%Y-%m-%d}_backtest.png",
+        f"results/{datetime.now():%Y-%m-%d}_backtest.png",
         dpi=300,
         bbox_inches="tight"
     )
     plt.close()
-
 
 # ================= Main =================
 if __name__ == "__main__":
@@ -239,64 +271,93 @@ if __name__ == "__main__":
     LOOKBACK = 40
     STEPS = 5
 
-    df = load_df_from_firestore(TICKER)
+    df = load_df_from_firestore(TICKER, days=500)
     df = ensure_today_row(df)
     df = add_features(df)
 
     FEATURES = ["Close", "Volume", "RSI", "MACD", "K", "D", "ATR_14"]
+
     df = df.dropna()
 
-    X, y_ret, y_dir, idx = create_sequences(df, FEATURES, STEPS, LOOKBACK)
+    X, y_ret, y_dir, idx = create_sequences(df, FEATURES, steps=STEPS, window=LOOKBACK)
+    print(f"df rows: {len(df)} | X samples: {len(X)}")
+
+    if len(X) < 40:
+        raise ValueError("⚠️ 可用序列太少（<40）。建議：降低 LOOKBACK/STEPS 或檢查資料是否缺欄位/過多 NaN。")
+
     split = int(len(X) * 0.85)
 
     X_tr, X_te = X[:split], X[split:]
-    y_ret_tr, y_dir_tr = y_ret[:split], y_dir[:split]
+    y_ret_tr, y_ret_te = y_ret[:split], y_ret[split:]
+    y_dir_tr, y_dir_te = y_dir[:split], y_dir[split:]
+    idx_tr, idx_te = idx[:split], idx[split:]
 
-    scaler = MinMaxScaler()
-    scaler.fit(df.loc[:idx[split-1], FEATURES].values)
+    # ✅ scaler.fit 僅用 train 區間（用 idx_tr 的最後日期界定）
+    train_end_date = pd.Timestamp(idx_tr[-1])
+    df_for_scaler = df.loc[:train_end_date, FEATURES].copy()
 
-    def scale(X):
-        n,t,f = X.shape
-        return scaler.transform(X.reshape(-1,f)).reshape(n,t,f)
+    if len(df_for_scaler) < LOOKBACK + 5:
+        raise ValueError("⚠️ train 區間太短，無法穩定 fit scaler。請確認資料量或調整 LOOKBACK。")
 
-    X_tr_s = scale(X_tr)
-    X_te_s = scale(X_te)
+    sx = MinMaxScaler()
+    sx.fit(df_for_scaler.values)
 
-    model = build_attention_lstm((LOOKBACK, len(FEATURES)), STEPS)
+    def scale_X(Xb):
+        n, t, f = Xb.shape
+        return sx.transform(Xb.reshape(-1, f)).reshape(n, t, f)
+
+    X_tr_s = scale_X(X_tr)
+    X_te_s = scale_X(X_te)
+
+    model = build_attention_lstm(
+        (LOOKBACK, len(FEATURES)),
+        STEPS,
+        max_daily_logret=0.06
+    )
+
     model.fit(
         X_tr_s,
         {"return": y_ret_tr, "direction": y_dir_tr},
         epochs=80,
         batch_size=16,
-        callbacks=[EarlyStopping(patience=10, restore_best_weights=True)],
-        verbose=2
+        verbose=2,
+        callbacks=[EarlyStopping(patience=10, restore_best_weights=True)]
     )
 
     pred_ret, pred_dir = model.predict(X_te_s, verbose=0)
-    raw = pred_ret[-1]
+    raw_returns = pred_ret[-1]  # ✅ 已被結構性限幅
 
-    price = df["Close"].iloc[-1]
+    print(f"📈 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
+
+    asof_date = df.index.max()
+    last_close = float(df.loc[asof_date, "Close"])
+
     prices = []
-    for r in raw:
+    price = last_close
+    for r in raw_returns:
         price *= np.exp(r)
         prices.append(price)
 
-    seq = df["Close"].iloc[-10:].tolist()
+    seq = df.loc[:asof_date, "Close"].iloc[-10:].tolist()
     future = []
     for p in prices:
         seq.append(p)
         future.append({
-            "Pred_Close": p,
-            "Pred_MA5": np.mean(seq[-5:]),
-            "Pred_MA10": np.mean(seq[-10:])
+            "Pred_Close": float(p),
+            "Pred_MA5": float(np.mean(seq[-5:])),
+            "Pred_MA10": float(np.mean(seq[-10:]))
         })
 
     future_df = pd.DataFrame(future)
-    future_df["date"] = pd.bdate_range(df.index[-1] + BDay(1), periods=STEPS)
+    future_df["date"] = pd.bdate_range(
+        start=df.index.max() + BDay(1),
+        periods=STEPS
+    )
 
+    # ✅ 預測數值輸出 CSV（隔天要疊今日實際用這份）
     os.makedirs("results", exist_ok=True)
     future_df.to_csv(f"results/{datetime.now():%Y-%m-%d}_forecast.csv",
                      index=False, encoding="utf-8-sig")
 
     plot_and_save(df, future_df)
-    plot_backtest_from_forecast_csv(df)
+    plot_backtest_error(df, X_te_s, y_ret_te, model, STEPS)
