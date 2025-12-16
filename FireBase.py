@@ -135,35 +135,39 @@ def plot_and_save(df_hist, future_df):
 
 # ================= 回測圖：昨日預測 vs 今日實際（折線） =================
 # ================= 回測圖（昨日 forecast.csv + 今日實際） =================
+# ================= 回測圖（自動找最近 forecast.csv） =================
 def plot_backtest_from_forecast_csv(df):
     """
-    回測圖定義：
-    - 使用「昨天 forecast.csv」中的所有 Pred_Close
-    - 折線畫出 Day+1 ~ Day+STEPS
-    - 最後一點接上「今天實際收盤價」
-    - 不使用模型、不畫今天預測、不輸出 CSV
+    回測圖：
+    - 自動尋找 results/ 內「最新一份、不是今天」的 forecast.csv
+    - 畫出 CSV 內全部 Pred_Close
+    - 最後接上今天實際 Close
     """
 
     today = df.index[-1]
     today_close = float(df["Close"].iloc[-1])
+    today_str = f"{today:%Y-%m-%d}"
 
-    yesterday = today - BDay(1)
-    fc_path = f"results/{yesterday:%Y-%m-%d}_forecast.csv"
+    files = sorted(
+        f for f in os.listdir("results")
+        if f.endswith("_forecast.csv") and not f.startswith(today_str)
+    )
 
-    if not os.path.exists(fc_path):
-        print(f"⚠️ 找不到昨日 forecast.csv：{fc_path}")
+    if not files:
+        print("⚠️ 找不到任何可用的 forecast.csv（排除今天）")
         return
+
+    latest_fc = files[-1]  # 最新的一份
+    fc_path = os.path.join("results", latest_fc)
 
     fc = pd.read_csv(fc_path)
     if fc.empty or "Pred_Close" not in fc.columns:
-        print("⚠️ forecast.csv 內容異常")
+        print(f"⚠️ forecast.csv 格式異常：{latest_fc}")
         return
 
-    # 昨天已知的預測
     pred_dates = pd.to_datetime(fc["date"])
     pred_prices = fc["Pred_Close"].astype(float).values
 
-    # 將今天實際接到最後
     all_dates = list(pred_dates) + [today]
     all_prices = list(pred_prices) + [today_close]
 
@@ -174,20 +178,18 @@ def plot_backtest_from_forecast_csv(df):
         all_prices,
         "o-",
         linewidth=2,
-        label="Yesterday Forecast → Today Actual"
+        label="Forecast Path → Today Actual"
     )
 
-    # 標註最後一點（今天）
-    plt.scatter(today, today_close, s=140, marker="*", label="Today Close")
+    plt.scatter(today, today_close, s=160, marker="*", label="Today Close")
     plt.text(
         today,
         today_close + 0.3,
         f"Actual {today_close:.2f}",
-        ha="center",
-        fontsize=10
+        ha="center"
     )
 
-    plt.title("Backtest | Forecast Path vs Today Actual")
+    plt.title(f"Backtest | {latest_fc.replace('_forecast.csv','')}")
     plt.xticks(rotation=45)
     plt.grid(True)
     plt.legend()
@@ -199,6 +201,7 @@ def plot_backtest_from_forecast_csv(df):
         bbox_inches="tight"
     )
     plt.close()
+
 
 # ================= Main =================
 if __name__ == "__main__":
