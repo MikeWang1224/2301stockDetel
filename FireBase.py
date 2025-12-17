@@ -239,14 +239,14 @@ def plot_backtest_error(df):
     used_csv = None
 
     for fname in csv_files:
-    date_str = fname.split("_")[0]          # 2025-12-16
-    file_date = pd.to_datetime(date_str)
+        date_str = fname.split("_")[0]          # 2025-12-16
+        file_date = pd.to_datetime(date_str)
 
-    if file_date < today:
-        path = os.path.join("results", fname)
-        fc = pd.read_csv(path, parse_dates=["date"])
-        used_csv = fname
-        break
+        if file_date < today:
+            path = os.path.join("results", fname)
+            fc = pd.read_csv(path, parse_dates=["date"])
+            used_csv = fname
+            break
 
 
     if fc is None:
