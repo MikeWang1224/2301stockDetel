@@ -211,48 +211,47 @@ def plot_and_save(df_hist, future_df):
     plt.savefig(f"results/{datetime.now():%Y-%m-%d}_pred.png",
                 dpi=300, bbox_inches="tight")
     plt.close()
-
-# ================= 回測誤差圖（PNG + CSV） =================
-# -*- coding: utf-8 -*-
-"""
-FireBase_Attention_LSTM_Direction.py
-（中略：前面完全不動）
-"""
-
 # ================= 回測決策分岔圖（PNG + CSV） =================
 def plot_backtest_error(df):
     """
     決策式回測圖（Decision-based Backtest）
 
-    - 前三天收盤價：趨勢背景
-    - 決策日 t
-    - 兩條線：
-        t → Pred(t+1)
-        t → Actual(t+1)
+    規則：
+    - 自動排除「今天」的 forecast
+    - 使用日期最近的一筆歷史 forecast
+    - 同一天重跑結果完全一致
     """
 
     today = pd.Timestamp(datetime.now().date())
 
-    # ================= 找昨天的 forecast =================
+    # ================= 找最近一次（排除今天）的 forecast =================
     if not os.path.exists("results"):
         print("⚠️ 無 results 資料夾，略過回測")
         return
 
-    csvs = sorted(
-        [f for f in os.listdir("results") if f.endswith("_forecast.csv")],
-        reverse=True
-    )
+    forecast_files = []
+    for f in os.listdir("results"):
+        if not f.endswith("_forecast.csv"):
+            continue
+        try:
+            d = pd.to_datetime(f.split("_")[0])
+        except Exception:
+            continue
 
-    forecast_csv = None
-    for f in csvs:
-        d = pd.to_datetime(f.split("_")[0])
+        # ✅ 關鍵：明確排除今天
         if d < today:
-            forecast_csv = os.path.join("results", f)
-            break
+            forecast_files.append((d, f))
 
-    if forecast_csv is None:
-        print("⚠️ 找不到昨日 forecast，略過回測")
+    if not forecast_files:
+        print("⚠️ 找不到可用的歷史 forecast（已排除今天）")
         return
+
+    # 取日期最近的一筆
+    forecast_files.sort(key=lambda x: x[0], reverse=True)
+    forecast_date, forecast_name = forecast_files[0]
+    forecast_csv = os.path.join("results", forecast_name)
+
+    print(f"📄 Backtest 使用 forecast：{forecast_name}")
 
     future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
 
@@ -276,6 +275,7 @@ def plot_backtest_error(df):
     # ================= 趨勢背景（三天） =================
     trend = df.loc[:t].tail(4)
     x_trend = np.arange(len(trend))
+    x_t = x_trend[-1]
 
     # ================= 畫圖 =================
     plt.figure(figsize=(14, 6))
@@ -283,9 +283,6 @@ def plot_backtest_error(df):
 
     # 趨勢線
     ax.plot(x_trend, trend["Close"], "k-o", label="Recent Close")
-
-    # 決策點 index
-    x_t = x_trend[-1]
 
     # Pred 線
     ax.plot(
@@ -324,7 +321,7 @@ def plot_backtest_error(df):
 
     os.makedirs("results", exist_ok=True)
     plt.savefig(
-        f"results/{datetime.now():%Y-%m-%d}_backtest.png",
+        f"results/{today:%Y-%m-%d}_backtest.png",
         dpi=300,
         bbox_inches="tight"
     )
@@ -332,16 +329,17 @@ def plot_backtest_error(df):
 
     # ================= CSV（單筆決策） =================
     bt = pd.DataFrame([{
+        "forecast_date": forecast_date.date(),
         "decision_day": t.date(),
         "close_t": close_t,
         "pred_t1": pred_t1,
         "actual_t1": actual_t1,
-        "direction_pred": np.sign(pred_t1 - close_t),
-        "direction_actual": np.sign(actual_t1 - close_t)
+        "direction_pred": int(np.sign(pred_t1 - close_t)),
+        "direction_actual": int(np.sign(actual_t1 - close_t))
     }])
 
     bt.to_csv(
-        f"results/{datetime.now():%Y-%m-%d}_backtest.csv",
+        f"results/{today:%Y-%m-%d}_backtest.csv",
         index=False,
         encoding="utf-8-sig"
     )
