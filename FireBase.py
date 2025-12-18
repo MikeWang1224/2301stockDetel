@@ -311,7 +311,7 @@ def plot_backtest_error(df):
     
     # ================= 數值標註（全部統一在點右邊） =================
     dx = 0.08   
-    price_offset = 0.3  # 或依股價調整，例如 0.2 ~ 0.5
+    price_offset = max(0.2, close_t * 0.002)# 或依股價調整，例如 0.2 ~ 0.5
 
     ax.text(
         x_t,
