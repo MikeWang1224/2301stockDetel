@@ -216,10 +216,12 @@ def plot_backtest_error(df):
     """
     決策式回測圖（Decision-based Backtest）
 
-    修正重點：
-    1) 排除今天 forecast，自動找最近一筆
-    2) 不使用 df.index.max() - BDay(1)（避免假今日資料）
-    3) 永遠使用最後一個「真實交易日」當決策日
+    特性：
+    - 自動排除今天的 forecast
+    - 使用最近一筆歷史 forecast
+    - 不受 ensure_today_row() 假資料影響
+    - 不怕週末 / 停市
+    - 圖中加入 run timestamp，確保 Git 每次都會更新 PNG
     """
 
     today = pd.Timestamp(datetime.now().date())
@@ -238,7 +240,7 @@ def plot_backtest_error(df):
         except Exception:
             continue
 
-        if d < today:  # ✅ 明確排除今天
+        if d < today:  # 明確排除今天
             forecast_files.append((d, f))
 
     if not forecast_files:
@@ -260,8 +262,8 @@ def plot_backtest_error(df):
         print("⚠️ 無足夠歷史交易日，略過回測")
         return
 
-    t = valid_days[-1]          # 最後一個真實交易日
-    t1 = valid_days[-1] + BDay(1)
+    t = valid_days[-1]
+    t1 = t + BDay(1)
 
     # ================= 價格 =================
     close_t = float(df.loc[t, "Close"])
@@ -281,8 +283,10 @@ def plot_backtest_error(df):
     plt.figure(figsize=(14, 6))
     ax = plt.gca()
 
+    # 最近收盤趨勢
     ax.plot(x_trend, trend["Close"], "k-o", label="Recent Close")
 
+    # Pred 線
     ax.plot(
         [x_t, x_t + 1],
         [close_t, pred_t1],
@@ -291,6 +295,7 @@ def plot_backtest_error(df):
         label="Pred (t → t+1)"
     )
 
+    # Actual 線
     ax.plot(
         [x_t, x_t + 1],
         [close_t, actual_t1],
@@ -299,12 +304,20 @@ def plot_backtest_error(df):
         label="Actual (t → t+1)"
     )
 
+    # 數值標註
     ax.text(x_t, close_t + 0.2, f"{close_t:.2f}", ha="center")
-    ax.text(x_t + 1, pred_t1 + 0.2, f"Pred\n{pred_t1:.2f}",
-            color="red", ha="center")
-    ax.text(x_t + 1, actual_t1 - 0.4, f"Actual\n{actual_t1:.2f}",
-            color="green", ha="center")
+    ax.text(
+        x_t + 1, pred_t1 + 0.2,
+        f"Pred\n{pred_t1:.2f}",
+        color="red", ha="center"
+    )
+    ax.text(
+        x_t + 1, actual_t1 - 0.4,
+        f"Actual\n{actual_t1:.2f}",
+        color="green", ha="center"
+    )
 
+    # X 軸
     labels = trend.index.strftime("%m-%d").tolist() + ["t+1"]
     ax.set_xticks(np.arange(len(labels)))
     ax.set_xticklabels(labels)
@@ -313,15 +326,43 @@ def plot_backtest_error(df):
     ax.legend()
     ax.grid(alpha=0.3)
 
-    os.makedirs("results", exist_ok=True)
+    # ================= 🔑 Run timestamp（保證每次 PNG 都不同） =================
+    ax.text(
+        0.01, 0.01,
+        f"Generated at {datetime.now():%Y-%m-%d %H:%M:%S}",
+        transform=ax.transAxes,
+        fontsize=8,
+        alpha=0.4,
+        ha="left", va="bottom"
+    )
 
+    # ================= 儲存 =================
+    os.makedirs("results", exist_ok=True)
     print(f"🖼️ 儲存 backtest 圖：{today:%Y-%m-%d}_backtest.png")
+
     plt.savefig(
         f"results/{today:%Y-%m-%d}_backtest.png",
         dpi=300,
         bbox_inches="tight"
     )
     plt.close()
+
+    # ================= CSV（單筆決策） =================
+    bt = pd.DataFrame([{
+        "forecast_date": forecast_date.date(),
+        "decision_day": t.date(),
+        "close_t": close_t,
+        "pred_t1": pred_t1,
+        "actual_t1": actual_t1,
+        "direction_pred": int(np.sign(pred_t1 - close_t)),
+        "direction_actual": int(np.sign(actual_t1 - close_t))
+    }])
+
+    bt.to_csv(
+        f"results/{today:%Y-%m-%d}_backtest.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
 
     # ================= CSV（單筆決策） =================
     bt = pd.DataFrame([{
