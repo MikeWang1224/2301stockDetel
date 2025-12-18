@@ -313,15 +313,16 @@ def plot_backtest_error(df):
     dx = 0.08   
     price_offset = max(0.2, close_t * 0.002)# 或依股價調整，例如 0.2 ~ 0.5
 
-    ax.text(
-        x_t,
-        close_t + price_offset,
+    
+    ax.annotate(
         f"{close_t:.2f}",
-        ha="right",
-        va="bottom",
-        fontsize=10,
-        color="black"
+        xy=(x_t, close_t),
+        xytext=(0, 8),
+        textcoords="offset points",
+        ha="center",
+        va="bottom"
     )
+
     
     # Pred t+1
     ax.text(
