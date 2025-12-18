@@ -1,2 +1,2 @@
-﻿decision_day,close_t,pred_t1,actual_t1,direction_pred,direction_actual
-2025-12-17,154.5,154.65362548828125,155.0,1.0,1.0
+﻿forecast_date,decision_day,close_t,pred_t1,actual_t1,direction_pred,direction_actual
+2025-12-17,2025-12-17,154.5,154.65362548828125,155.0,1,1
