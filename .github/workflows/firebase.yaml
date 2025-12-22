@@ -1,12 +1,12 @@
-name: Run Liteon Stock Program
+name: Run Stock Programs (Liteon + Nanya)
 
 on:
   push:
-    branches: 
+    branches:
       - main
   schedule:
     # 每天 UTC 05:50 = 台灣時間 13:50
-    - cron: '50 5 * * *' 
+    - cron: '50 5 * * *'
   workflow_dispatch:
 
 permissions:
@@ -45,12 +45,19 @@ jobs:
         run: |
           python catch_stock.py
 
-      # ---------------- 再跑 LSTM / 預測 / 繪圖 ----------------
-      - name: Run stock prediction program (FireBase.py)
+      # ---------------- 再跑 LSTM / 預測 / 繪圖：光寶 ----------------
+      - name: Run stock prediction program (Liteon - FireBase.py)
         env:
           FIREBASE: ${{ secrets.FIREBASE }}
         run: |
           python FireBase.py
+
+      # ---------------- 再跑 LSTM / 預測 / 繪圖：南亞科 ----------------
+      - name: Run stock prediction program (Nanya - 2408stock.py)
+        env:
+          FIREBASE: ${{ secrets.FIREBASE }}
+        run: |
+          python 2408stock.py
 
       # ---------------- 讓 HTML 一定更新（關鍵） ----------------
       - name: Update build time in index.html
@@ -69,5 +76,5 @@ jobs:
           git add results/*.png
           git add results/*.csv
           git add index.html
-          git commit -m "Update stock chart and refresh HTML" || echo "No changes to commit"
+          git commit -m "Update stock charts and refresh HTML" || echo "No changes to commit"
           git push
