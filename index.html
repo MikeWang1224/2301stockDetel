@@ -66,17 +66,17 @@
   <h1 id="title">載入中…</h1>
   <div class="hint" id="hint"></div>
 
-  <!-- 第一張 -->
+  <!-- 第一張：預測 -->
   <div class="section" id="predSection">
-    <div class="section-title">
+    <div class="section-title" id="predTitle">
       收盤價、五日線（綠線）、十日線（藍線）
     </div>
     <img id="predImg" alt="Prediction">
   </div>
 
-  <!-- 第二張 -->
+  <!-- 第二張：回測 -->
   <div class="section" id="backtestSection">
-    <div class="section-title big">
+    <div class="section-title big" id="backtestTitle">
       結果回推（預測準不準）
     </div>
     <img id="backtestImg" alt="Backtest">
@@ -85,6 +85,12 @@
   <script>
     const MAX_LOOKBACK_DAYS = 10;
     const IMG_FOLDER = "results";
+
+    // 你要顯示的股票（可加可減）
+    const TICKERS = [
+      { ticker: "2408.TW", name: "南亞科" },
+      { ticker: "2301.TW", name: "光寶科" }
+    ];
 
     function getTWDate(baseDate = new Date()) {
       const tw = new Date(
@@ -96,50 +102,86 @@
       return `${yyyy}-${mm}-${dd}`;
     }
 
-    function loadImage(src) {
-      return new Promise((resolve, reject) => {
+    function loadImageIfExists(src) {
+      return new Promise((resolve) => {
         const img = new Image();
-        img.onload = () => resolve(src);
-        img.onerror = reject;
+        img.onload = () => resolve(true);
+        img.onerror = () => resolve(false);
         img.src = src + "?t=" + Date.now();
       });
     }
 
-    async function findLatestTradingDay() {
+    // 找最近日期：只要 pred 存在就算成功；backtest 有就加顯示
+    async function findLatestForTicker(tickerObj) {
+      const { ticker, name } = tickerObj;
+
       for (let i = 0; i <= MAX_LOOKBACK_DAYS; i++) {
         const d = new Date();
         d.setDate(d.getDate() - i);
         const dateStr = getTWDate(d);
 
-        const pred = `${IMG_FOLDER}/${dateStr}_pred.png`;
-        const backtest = `${IMG_FOLDER}/${dateStr}_backtest.png`;
+        const pred = `${IMG_FOLDER}/${dateStr}_${ticker}_pred.png`;
+        const backtest = `${IMG_FOLDER}/${dateStr}_${ticker}_backtest.png`;
 
-        try {
-          await Promise.all([
-            loadImage(pred),
-            loadImage(backtest)
-          ]);
+        const predOK = await loadImageIfExists(pred);
+        if (!predOK) continue; // pred 沒有就換前一天
 
-          document.getElementById("title").innerText =
-            `圖表日期：${dateStr}`;
-          document.getElementById("hint").innerText =
-            i === 0 ? "（今日）" : `（往前第 ${i} 天）`;
+        const backtestOK = await loadImageIfExists(backtest);
 
-          document.getElementById("predImg").src = pred;
-          document.getElementById("backtestImg").src = backtest;
-
-          document.getElementById("predSection").style.display = "block";
-          document.getElementById("backtestSection").style.display = "block";
-          return;
-        } catch (e) {}
+        return {
+          dateStr,
+          offsetDays: i,
+          predSrc: pred,
+          backtestSrc: backtest,
+          backtestOK,
+          ticker,
+          name
+        };
       }
 
-      document.getElementById("title").innerText = "找不到可用圖表";
-      document.getElementById("hint").innerText =
-        `最近 ${MAX_LOOKBACK_DAYS} 天內沒有任何完整圖片`;
+      return null;
     }
 
-    findLatestTradingDay();
+    async function main() {
+      // 依序找：先南亞科，找不到再找光寶（你也可以反過來）
+      for (const t of TICKERS) {
+        const found = await findLatestForTicker(t);
+        if (!found) continue;
+
+        // 標題
+        document.getElementById("title").innerText =
+          `${found.name}（${found.ticker}）圖表日期：${found.dateStr}`;
+        document.getElementById("hint").innerText =
+          found.offsetDays === 0 ? "（今日）" : `（往前第 ${found.offsetDays} 天）`;
+
+        // 預測：一定顯示
+        document.getElementById("predTitle").innerText =
+          `${found.name}｜收盤價、五日線（綠線）、十日線（藍線）`;
+        document.getElementById("predImg").src = found.predSrc;
+        document.getElementById("predSection").style.display = "block";
+
+        // 回測：有就顯示，沒有就隱藏
+        if (found.backtestOK) {
+          document.getElementById("backtestTitle").innerText =
+            `${found.name}｜結果回推（預測準不準）`;
+          document.getElementById("backtestImg").src = found.backtestSrc;
+          document.getElementById("backtestSection").style.display = "block";
+        } else {
+          document.getElementById("backtestSection").style.display = "none";
+        }
+
+        return; // 找到一組就結束
+      }
+
+      // 都找不到（南亞科 + 光寶都沒有 pred）
+      document.getElementById("title").innerText = "找不到可用圖表";
+      document.getElementById("hint").innerText =
+        `最近 ${MAX_LOOKBACK_DAYS} 天內沒有任何「預測圖」`;
+      document.getElementById("predSection").style.display = "none";
+      document.getElementById("backtestSection").style.display = "none";
+    }
+
+    main();
   </script>
 
 </body>
