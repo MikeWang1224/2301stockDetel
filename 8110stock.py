@@ -7,7 +7,7 @@ FireBase_Attention_LSTM_Direction.py  (8110stock.py)
   1) LOOKBACK=40, STEPS=5
   2) LSTM + Attention pooling（參數比 Transformer 更適合小資料）
   3) ✅ Return head 加 tanh 限幅（避免預測爆炸）
-  4) ✅ Volume 做 log1p（小資料更穩）
+  4) ✅ Volume 做 log1p（小資料更穩） 
 - 圖表輸出完全不變（保留 Today 標記）
 
 ✅ 改1：修正 scaler fit / split 座標系，避免資料洩漏（leakage）
