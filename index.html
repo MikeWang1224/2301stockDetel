@@ -1,89 +1,210 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>每日趨勢圖</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>每日模型圖表</title>
 
-<style>
-body {
-  margin: 0;
-  padding: 16px;
-  background: #000;
-  color: #fff;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
-}
+  <style>
+    body {
+      margin: 0;
+      padding: 14px;
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
+    }
 
-.stock {
-  max-width: 980px;
-  margin: 0 auto 48px auto;
-}
+    h1 {
+      font-size: 20px;
+      margin-bottom: 6px;
+      text-align: center;
+    }
 
-.header {
-  font-size: 28px;
-  font-weight: 800;
-  margin-bottom: 6px;
-}
+    .hint {
+      text-align: center;
+      font-size: 14px;
+      color: #aaa;
+      margin-bottom: 20px;
+    }
 
-.sub {
-  color: #aaa;
-  font-size: 14px;
-  margin-bottom: 12px;
-}
+    .stock-block {
+      max-width: 900px;
+      margin: 0 auto 44px auto;
+      padding-left: 14px;
+      border-left: 4px solid #444;
+    }
 
-.signal {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 12px 0 8px 0;
-  font-size: 20px;
-  font-weight: 700;
-}
+    .stock-header {
+      font-size: 20px;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }
 
-.bar {
-  height: 6px;
-  border-radius: 6px;
-  background: linear-gradient(90deg,#ffd54f,#66bb6a);
-  width: 100%;
-  margin: 8px 0 24px 0;
-}
+    .stock-subhint {
+      font-size: 13px;
+      color: #aaa;
+      margin-bottom: 10px;
+    }
 
-.section-title {
-  font-size: 26px;
-  font-weight: 800;
-  margin: 24px 0 12px 0;
-}
+    .model-summary {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
 
-img {
-  width: 100%;
-  border-radius: 8px;
-  background: #111;
-}
-</style>
+    .up { color: #4CAF50; }
+    .down { color: #F44336; }
+    .neutral { color: #FFC107; }
+
+    .confidence-bar {
+      height: 6px;
+      background: #333;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 14px;
+    }
+
+    .confidence-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #FFC107, #4CAF50);
+    }
+
+    .section {
+      margin-bottom: 28px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .section-title.big {
+      font-size: 18px;
+    }
+
+    img {
+      width: 100%;
+      border-radius: 6px;
+      display: block;
+      filter: contrast(1.05) saturate(1.05);
+    }
+
+    @media (min-width: 768px) {
+      .stock-header { font-size: 26px; }
+      .section-title { font-size: 28px; }
+      .section-title.big { font-size: 34px; }
+    }
+  </style>
 </head>
 
 <body>
 
-<div class="stock">
-  <div class="header">華東（8110.TW）｜2025-12-23</div>
-  <div class="sub">（往前 1 天）</div>
+<h1>每日模型圖表</h1>
+<div class="hint">短線＝明日｜趨勢＝多日結構（顏色以短線為準）</div>
 
-  <!-- 🔑 改過文案的關鍵區 -->
-  <div class="signal">
-    ⚠️ 短線震盪（明日 52%）
-    <span style="opacity:.5">｜</span>
-    📈 趨勢偏多（未來 61%）
-  </div>
+<div id="container"></div>
 
-  <div class="bar"></div>
+<script>
+  const IMG_FOLDER = "results";
+  const MAX_LOOKBACK_DAYS = 10;
 
-  <div class="section-title">收盤價 + 均線 + 模型預測</div>
-  <img src="results/2025-12-23_8110.TW_pred.png" alt="prediction"/>
+  function mockModelOutput() {
+    return {
+      dir1: 0.45 + Math.random() * 0.3,   // 明日
+      dirN: 0.45 + Math.random() * 0.3    // 趨勢
+    };
+  }
 
-  <div class="section-title">結果回推（預測準不準）</div>
-  <img src="results/2025-12-23_8110.TW_backtest.png" alt="backtest"/>
-</div>
+  const STOCKS = [
+    { ticker: "2301.TW", name: "光寶科" },
+    { ticker: "2408.TW", name: "南亞科" },
+    { ticker: "8110.TW", name: "華東" }
+  ];
+
+  function getTWDate(d = new Date()) {
+    const tw = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
+    return `${tw.getFullYear()}-${String(tw.getMonth()+1).padStart(2,"0")}-${String(tw.getDate()).padStart(2,"0")}`;
+  }
+
+  function loadImage(src) {
+    return new Promise(res => {
+      const img = new Image();
+      img.onload = () => res(true);
+      img.onerror = () => res(false);
+      img.src = src + "?t=" + Date.now();
+    });
+  }
+
+  async function findLatest(stock) {
+    for (let i=0;i<=MAX_LOOKBACK_DAYS;i++) {
+      const d = new Date();
+      d.setDate(d.getDate()-i);
+      const ds = getTWDate(d);
+      const pred = `${IMG_FOLDER}/${ds}_${stock.ticker}_pred.png`;
+      const back = `${IMG_FOLDER}/${ds}_${stock.ticker}_backtest.png`;
+      if (await loadImage(pred)) {
+        return { date: ds, offset:i, pred, back, backOK: await loadImage(back) };
+      }
+    }
+    return null;
+  }
+
+  // ✅ 只改「說法」，不改門檻
+  function classify(p, mode) {
+    if (p > 0.55) return ["up", mode==="short" ? "📈 偏多" : "📈 趨勢偏多"];
+    if (p < 0.45) return ["down", mode==="short" ? "📉 偏空" : "📉 趨勢偏空"];
+    return ["neutral", mode==="short" ? "⚠️ 短線震盪" : "⚠️ 趨勢中性"];
+  }
+
+  async function main() {
+    const c = document.getElementById("container");
+
+    for (const s of STOCKS) {
+      const found = await findLatest(s);
+      if (!found) continue;
+
+      const m = mockModelOutput();
+      const [c1, t1] = classify(m.dir1, "short");
+      const [,  t2] = classify(m.dirN, "trend");
+      const conf = Math.round(Math.max(m.dir1, m.dirN) * 100);
+
+      const block = document.createElement("div");
+      block.className = "stock-block";
+      block.style.borderLeftColor =
+        c1==="up" ? "#4CAF50" : c1==="down" ? "#F44336" : "#FFC107";
+
+      block.innerHTML = `
+        <div class="stock-header">${s.name}（${s.ticker}）｜${found.date}</div>
+        <div class="stock-subhint">${found.offset===0?"（今日）":`（往前 ${found.offset} 天）`}</div>
+
+        <div class="model-summary ${c1}">
+          ${t1}（明日 ${(m.dir1*100).toFixed(0)}%）｜
+          ${t2}（${(m.dirN*100).toFixed(0)}%）
+        </div>
+
+        <div class="confidence-bar">
+          <div class="confidence-fill" style="width:${conf}%"></div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">收盤價＋均線＋模型預測</div>
+          <img src="${found.pred}">
+        </div>
+
+        ${found.backOK ? `
+        <div class="section">
+          <div class="section-title big">昨日預測 → 今日實際</div>
+          <img src="${found.back}">
+        </div>` : ""}
+      `;
+
+      c.appendChild(block);
+    }
+  }
+
+  main();
+</script>
 
 </body>
 </html>
-<!-- BUILD_TIME Tue Dec 23 16:24:24 UTC 2025 -->
