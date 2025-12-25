@@ -408,10 +408,13 @@ def forecast_6m_trend(
         # scale X
         X_win = window_df[features].values
         X_win = scaler.transform(X_win).reshape(1, lookback, len(features))
-
+      
+        # ===== A方案：去除長期 drift（關鍵修正）=====
         pred_ret, _ = model.predict(X_win, verbose=0)
         norm_rets = pred_ret[0]
-
+      
+        drift = np.mean(norm_rets)
+        norm_rets = norm_rets - drift
         # 取 asof 的波動尺度
         scale = float(df_ext["RET_STD_20"].iloc[-1])
         scale = max(scale, 1e-6)
