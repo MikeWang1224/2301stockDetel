@@ -431,7 +431,8 @@ def plot_6m_trend_advanced(
     daily_drift *= trend_score
 
       
-    monthly_logret = daily_drift * DPM
+    decay = np.exp(-np.linspace(0, 1.2, MONTHS))  # 1.0 → ~0.3
+    monthly_logret = daily_drift * DPM * decay
     
     trend = []
     p = last_close
@@ -504,7 +505,7 @@ def plot_6m_trend_advanced(
     # =============================
     # 6️⃣ 區間帶（ATR-based fan）
     # =============================
-    time_scale = np.linspace(0.6, 1.3, len(prices))
+    time_scale = np.linspace(0.8, 1.6, len(prices))
     upper = prices * (1 + base_amp * time_scale)
     lower = prices * (1 - base_amp * time_scale)
 
