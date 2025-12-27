@@ -747,9 +747,10 @@ if __name__ == "__main__":
 
     future_df = pd.DataFrame(future)
     future_df["date"] = pd.bdate_range(
-        start=df.index.max() + BDay(1),
+        start=asof_date + BDay(1),
         periods=STEPS
     )
+
 
     # ✅ 預測數值輸出 CSV（檔名含 ticker）
     os.makedirs("results", exist_ok=True)
