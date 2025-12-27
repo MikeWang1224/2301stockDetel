@@ -299,6 +299,9 @@ def plot_backtest_error(df, ticker: str):
     - 自動排除今天的 forecast
     - 使用最近一筆歷史 forecast（同 ticker）
     """
+        # === 只保留真實交易日（排除 ensure_latest_trading_row 補的假日）===
+    real_df = df.copy()
+    real_df = real_df[real_df["Close"].diff().abs() > 1e-9]
 
     today = pd.Timestamp(datetime.now().date())
 
@@ -329,21 +332,23 @@ def plot_backtest_error(df, ticker: str):
 
     future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
 
-    valid_days = df.index[df.index < today]
+        # === 用「真實交易日」決定 t / t+1 ===
+    valid_days = real_df.index[real_df.index < today]
+
     if len(valid_days) < 2:
-        print("⚠️ 無足夠歷史交易日，略過回測")
+        print("⚠️ 無足夠真實交易日，略過回測")
         return
 
-    t = valid_days[-1]
-    t1 = t + BDay(1)
+    # t = 最後一個可決策日
+    # t1 = 真正發生的下一個交易日
+    t = valid_days[-2]
+    t1 = valid_days[-1]
 
-    close_t = float(df.loc[t, "Close"])
+
+    close_t = float(real_df.loc[t, "Close"])
     pred_t1 = float(future_df.loc[0, "Pred_Close"])
-
-    if t1 in df.index:
-        actual_t1 = float(df.loc[t1, "Close"])
-    else:
-        actual_t1 = float(df["Close"].iloc[-1])
+    actual_t1 = float(real_df.loc[t1, "Close"])
+    
 
     trend = df.loc[:t].tail(4)
     x_trend = np.arange(len(trend))
