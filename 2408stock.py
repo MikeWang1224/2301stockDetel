@@ -572,10 +572,19 @@ if __name__ == "__main__":
     future_df = pd.DataFrame(future)
     last_trade_date = df.index[-1]
 
-    future_df["date"] = pd.bdate_range(
-        start=last_trade_date,
-        periods=STEPS + 1
-    )[1:]
+    # ================= 生成未來交易日（台股實際交易日） =================
+    # 從 df index 找到 asof_date 的位置
+    asof_idx = df.index.get_loc(asof_date)
+    future_dates = df.index[asof_idx + 1 : asof_idx + 1 + STEPS]
+    
+    # 若資料不足 STEPS 天，補最後一天（避免報錯）
+    if len(future_dates) < STEPS:
+        last_date = df.index[-1]
+        while len(future_dates) < STEPS:
+            future_dates = future_dates.append(pd.DatetimeIndex([last_date]))
+    
+    future_df["date"] = future_dates
+
 
 
     future_df.to_csv(
