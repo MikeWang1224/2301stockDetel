@@ -95,6 +95,21 @@ def ensure_latest_trading_row(df):
 
     return df.sort_index()
 
+def get_asof_trading_day(df: pd.DataFrame):
+    """
+    回傳 (asof_date, is_today_trading)
+    - 若今天是交易日 → 用今天
+    - 若今天非交易日 → 用最近一個交易日
+    """
+    today = pd.Timestamp(datetime.now().date())
+    last_trading_day = df.index.max()
+
+    if last_trading_day.normalize() == today:
+        return last_trading_day, True
+    else:
+        return last_trading_day, False
+
+
 
 # ================= Feature Engineering（華東專屬） =================
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -683,8 +698,13 @@ if __name__ == "__main__":
 
     print(f"📈 預測方向機率（看漲）: {pred_dir[-1][0]:.2%}")
 
-    asof_date = df.index.max()
+    asof_date, is_today_trading = get_asof_trading_day(df)
+
+    if not is_today_trading:
+        print(f"ℹ️ 今日非交易日，8110.TW 使用最近交易日 {asof_date.date()}")
+    
     last_close = float(df.loc[asof_date, "Close"])
+
 
     # ✅ 把 normalized return 乘回波動尺度（用 asof 的 RET_STD_20）
     scale_last = float(df.loc[asof_date, "RET_STD_20"])
