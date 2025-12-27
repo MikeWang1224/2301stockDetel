@@ -78,6 +78,7 @@ def ensure_latest_trading_row(df):
     today = pd.Timestamp(datetime.now().date())
     last = df.index.max()
 
+    # 補齊中間缺的 BDay（例如 12/25）
     all_days = pd.bdate_range(last, today)
 
     for d in all_days[1:]:
@@ -207,53 +208,66 @@ def plot_and_save(df_hist, future_df, ticker: str):
     plt.close()
 
 # ================= 回測決策分岔圖（檔名含 ticker） =================
-def plot_backtest_error(df, ticker: str):
-    today = pd.Timestamp(datetime.now().date())
-
+def plot_backtest_error(df, ticker):
     if not os.path.exists("results"):
         print("⚠️ 無 results 資料夾，略過回測")
         return
 
-    # ✅ 只抓同 ticker 的 forecast：YYYY-MM-DD_TICKER_forecast.csv
+    # === 找最近一份「已發生」的 forecast ===
+    suffix = f"_{ticker}_forecast.csv"
     forecast_files = []
+
     for f in os.listdir("results"):
-        if not f.endswith(f"_{ticker}_forecast.csv"):
+        if not f.endswith(suffix):
             continue
         try:
             d = pd.to_datetime(f.split("_")[0])
+            forecast_files.append((d, f))
         except Exception:
             continue
-        if d < today:
-            forecast_files.append((d, f))
 
     if not forecast_files:
-        print("⚠️ 找不到可用的歷史 forecast（已排除今天 & 已限定 ticker）")
+        print(f"⚠️ 找不到 forecast：{ticker}")
         return
 
-    forecast_files.sort(key=lambda x: x[0], reverse=True)
-    forecast_date, forecast_name = forecast_files[0]
-    forecast_csv = os.path.join("results", forecast_name)
-
-    print(f"📄 Backtest 使用 forecast：{forecast_name}")
-
-    future_df = pd.read_csv(forecast_csv, parse_dates=["date"])
-
-    valid_days = df.index[df.index < today]
-    if len(valid_days) < 2:
-        print("⚠️ 無足夠歷史交易日，略過回測")
+    last_trading_day = df.index.max()
+    valid = []
+    
+    for d, f in forecast_files:
+        # forecast_date + 1 必須已經有實際資料
+        idx = df.index.get_indexer([d])
+        if idx[0] == -1:
+            continue
+        if idx[0] + 1 < len(df.index):
+            valid.append((d, f))
+    
+    if not valid:
+        print("⚠️ 找不到可回測的 forecast（尚無實際 t+1）")
         return
+    
+    # 用最近一個「已完成回測條件」的 forecast
+    forecast_date, forecast_name = max(valid, key=lambda x: x[0])
 
-    t = valid_days[-1]
-    t1 = t + BDay(1)
+    future_df = pd.read_csv(
+        os.path.join("results", forecast_name),
+        parse_dates=["date"]
+    )
+
+    # === 只用真實交易日 ===
+    t, t1 = get_last_two_trading_days(df)
 
     close_t = float(df.loc[t, "Close"])
-    pred_t1 = float(future_df.loc[0, "Pred_Close"])
+    actual_t1 = float(df.loc[t1, "Close"])
 
-    if t1 in df.index:
-        actual_t1 = float(df.loc[t1, "Close"])
-    else:
-        actual_t1 = float(df["Close"].iloc[-1])
+    # forecast 的第一天必須是 t1
+    pred_row = future_df[future_df["date"] == t1]
+    if pred_row.empty:
+        print("⚠️ forecast 與交易日未對齊，略過回測")
+        return
 
+    pred_t1 = float(pred_row["Pred_Close"].iloc[0])
+
+    # === 繪圖 ===
     trend = df.loc[:t].tail(4)
     x_trend = np.arange(len(trend))
     x_t = x_trend[-1]
@@ -262,22 +276,26 @@ def plot_backtest_error(df, ticker: str):
     ax = plt.gca()
 
     ax.plot(x_trend, trend["Close"], "k-o", label="Recent Close")
-    ax.plot([x_t, x_t + 1], [close_t, pred_t1], "r--o", linewidth=2.5, label="Pred (t → t+1)")
-    ax.plot([x_t, x_t + 1], [close_t, actual_t1], "g-o", linewidth=2.5, label="Actual (t → t+1)")
+    ax.plot([x_t, x_t + 1], [close_t, pred_t1],
+            "r--o", linewidth=2.5, label="Pred (t → t+1)")
+    ax.plot([x_t, x_t + 1], [close_t, actual_t1],
+            "g-o", linewidth=2.5, label="Actual (t → t+1)")
 
-    dx = 0.08
     price_offset = max(0.2, close_t * 0.002)
 
-    ax.text(x_t, close_t + price_offset, f"{close_t:.2f}", ha="center", va="bottom", fontsize=18, color="black")
-    ax.text(x_t + 1 + dx, pred_t1, f"Pred {pred_t1:.2f}", ha="left", va="center", fontsize=16, color="red")
-    ax.text(x_t + 1 + dx, actual_t1, f"Actual {actual_t1:.2f}", ha="left", va="center", fontsize=16, color="green")
+    ax.text(x_t, close_t + price_offset, f"{close_t:.2f}",
+            ha="center", fontsize=18)
+    ax.text(x_t + 1.05, pred_t1, f"Pred {pred_t1:.2f}",
+            color="red", fontsize=16, va="center")
+    ax.text(x_t + 1.05, actual_t1, f"Actual {actual_t1:.2f}",
+            color="green", fontsize=16, va="center")
 
     labels = trend.index.strftime("%m-%d").tolist()
     labels.append(t1.strftime("%m-%d"))
     ax.set_xticks(np.arange(len(labels)))
     ax.set_xticklabels(labels)
 
-    ax.set_title("2301.TW Decision Backtest (t → t+1)")
+    ax.set_title(f"{ticker} Decision Backtest (t → t+1)")
     ax.legend()
     ax.grid(alpha=0.3)
 
@@ -285,17 +303,16 @@ def plot_backtest_error(df, ticker: str):
         0.01, 0.01,
         f"Generated at {now_tw:%Y-%m-%d %H:%M:%S} (TW)",
         transform=ax.transAxes,
-        fontsize=8,
-        alpha=0.4,
-        ha="left",
-        va="bottom"
+        fontsize=8, alpha=0.4
     )
 
     os.makedirs("results", exist_ok=True)
-    out_png = f"results/{today:%Y-%m-%d}_{ticker}_backtest.png"
-    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+    today = datetime.now().date()
+    plt.savefig(f"results/{today}_{ticker}_backtest.png",
+                dpi=300, bbox_inches="tight")
     plt.close()
 
+    # === CSV ===
     bt = pd.DataFrame([{
         "forecast_date": forecast_date.date(),
         "decision_day": t.date(),
@@ -306,8 +323,22 @@ def plot_backtest_error(df, ticker: str):
         "direction_actual": int(np.sign(actual_t1 - close_t))
     }])
 
-    out_csv = f"results/{today:%Y-%m-%d}_{ticker}_backtest.csv"
-    bt.to_csv(out_csv, index=False, encoding="utf-8-sig")
+    bt.to_csv(
+        f"results/{today}_{ticker}_backtest.csv",
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+
+def get_last_two_trading_days(df):
+    """
+    回傳最後兩個「真實交易日」 (t, t+1)
+    """
+    idx = df.index.sort_values()
+    if len(idx) < 2:
+        raise ValueError("⚠️ 交易日不足，無法回測")
+    return idx[-2], idx[-1]
+
 
 # ================= Main =================
 if __name__ == "__main__":
