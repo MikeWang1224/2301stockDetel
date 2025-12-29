@@ -296,6 +296,10 @@ def plot_backtest_error(df, ticker):
     ✅ 正確時間序回測（以 forecast 當天為 anchor）
     ✅ 只選「最新但排除今天」的 forecast
     """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    
+    gen_time = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
 
     suffix = f"_{ticker}_forecast.csv"
     forecast_files = []
@@ -384,11 +388,15 @@ def plot_backtest_error(df, ticker):
 
     ax.text(
         0.01, 0.01,
-        f"Forecast file: {forecast_name}",
+        f"Generated at (TW): {gen_time}\nForecast source: {forecast_name}",
         transform=ax.transAxes,
-        fontsize=8, alpha=0.4
+        fontsize=8,
+        alpha=0.4
     )
 
+
+    ts = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
+    
     os.makedirs("results", exist_ok=True)
     out_date = datetime.now().date()
     plt.savefig(
@@ -598,14 +606,13 @@ if __name__ == "__main__":
 
     # ================= 生成未來交易日（台股實際交易日） =================
     # 從 df index 找到 asof_date 的位置
-    asof_idx = df.index.get_loc(asof_date)
-    future_dates = df.index[asof_idx + 1 : asof_idx + 1 + STEPS]
+    # ================= 正確生成未來交易日（使用 BDay） =================
+    from pandas.tseries.offsets import BDay
     
-    # 若資料不足 STEPS 天，補最後一天（避免報錯）
-    if len(future_dates) < STEPS:
-        last_date = df.index[-1]
-        while len(future_dates) < STEPS:
-            future_dates = future_dates.append(pd.DatetimeIndex([last_date]))
+    future_dates = pd.bdate_range(
+        start=asof_date + BDay(1),
+        periods=STEPS
+    )
     
     future_df["date"] = future_dates
 
