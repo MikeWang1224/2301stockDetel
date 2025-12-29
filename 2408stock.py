@@ -291,13 +291,8 @@ def plot_and_save(df_hist, future_df, ticker):
     plt.savefig(f"results/{datetime.now():%Y-%m-%d}_{ticker}_pred.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-# ================= 回測決策分岔圖（PNG + CSV，讀對應 ticker forecast） =================
 def plot_backtest_error(df, ticker):
-    if not os.path.exists("results"):
-        print("⚠️ 無 results 資料夾，略過回測")
-        return
-
-    # === 找最近一份「已發生」的 forecast ===
+    # 找最近一份 forecast
     suffix = f"_{ticker}_forecast.csv"
     forecast_files = []
 
@@ -306,34 +301,34 @@ def plot_backtest_error(df, ticker):
             continue
         try:
             d = pd.to_datetime(f.split("_")[0])
+            if d >= datetime.now().date():  # ✅ 排除今天的 forecast
+                continue
             forecast_files.append((d, f))
         except Exception:
             continue
 
     if not forecast_files:
-        print(f"⚠️ 找不到 forecast：{ticker}")
+        print(f"⚠️ 沒有可回測的 forecast：{ticker}")
         return
 
+    # 最新的 forecast 優先
     forecast_files.sort(key=lambda x: x[0], reverse=True)
     forecast_date, forecast_name = forecast_files[0]
-    future_df = pd.read_csv(
-        os.path.join("results", forecast_name),
-        parse_dates=["date"]
-    )
+    future_df = pd.read_csv(os.path.join("results", forecast_name), parse_dates=["date"])
 
-    # === 只用真實交易日 ===
+    # 真實交易日 t, t+1
     t, t1 = get_last_two_trading_days(df)
-
     close_t = float(df.loc[t, "Close"])
     actual_t1 = float(df.loc[t1, "Close"])
 
-    # forecast 的第一天必須是 t1
     pred_row = future_df[future_df["date"] == t1]
     if pred_row.empty:
         print("⚠️ forecast 與交易日未對齊，略過回測")
         return
-
     pred_t1 = float(pred_row["Pred_Close"].iloc[0])
+
+    # 畫圖 + CSV 輸出
+
 
     # === 繪圖 ===
     trend = df.loc[:t].tail(4)
