@@ -1,0 +1,2 @@
+﻿forecast_file,decision_day,close_t,pred_t1,actual_t1,direction_pred,direction_actual,hit
+2026-03-15_8110.TW_forecast.csv,2026-03-13,53.20000076293945,55.523826372491,55.400001525878906,1,1,1
